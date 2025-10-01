@@ -1,3 +1,12 @@
+# Custom
+output/
+results/
+data/
+*.safetensors
+*.ckpt
+*.pth
+*.arrow
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
