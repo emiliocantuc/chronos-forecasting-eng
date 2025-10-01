@@ -11,7 +11,10 @@ max_steps: 1_000 #200_000
 save_steps: 1_000 #100_000
 log_steps: 100
 eval_steps: 200
+train_m: 2
+eval_m: 64
 per_device_train_batch_size: 32
+per_device_eval_batch_size: 8
 learning_rate: 0.001
 optim: adamw_torch_fused
 num_samples: 20

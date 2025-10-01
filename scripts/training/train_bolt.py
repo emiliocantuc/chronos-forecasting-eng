@@ -8,7 +8,7 @@ import itertools
 from pathlib import Path
 from functools import partial
 import random
-from typing import List, Iterator, Optional, Tuple
+from typing import List, Iterator, Optional
 
 import typer
 from typer_config import use_yaml_config
@@ -219,12 +219,26 @@ def bolt_collate(batch):
 
 
 class BoltTrainer(Trainer):
+    def __init__(
+        self,
+        *args,
+        train_m: int = 2,
+        eval_m: int = 64,
+        mc_dropout: bool = False,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.train_m = train_m
+        self.eval_m = eval_m
+        self.mc_dropout = mc_dropout
+
     def compute_loss(self, model, inputs, return_outputs=False, *args, **kwargs):
         out = model(
             context=inputs["context"],
             mask=inputs.get("mask", None),
             target=inputs.get("target", None),
             target_mask=inputs.get("target_mask", None),
+            m=self.train_m,
         )
         loss = out.loss
         return (loss, out) if return_outputs else loss
@@ -233,15 +247,19 @@ class BoltTrainer(Trainer):
     def prediction_step(
         self, model, inputs, prediction_loss_only: bool, ignore_keys=None
     ):
-        model.train()  # force dropout on eval
-        model.m = 64  # TODO add as arg. Also change batch_size during eval
+        prev_mode = model.training
+        model.train(self.mc_dropout)
 
         out = model(
             context=inputs["context"],
             mask=inputs.get("mask"),
             target=inputs.get("target"),
             target_mask=inputs.get("target_mask"),
+            m=self.eval_m,
         )
+
+        model.train(prev_mode)
+
         loss = out.loss.detach().to("cpu") if out.loss is not None else None
         preds = out.quantile_preds.detach().to("cpu")
 
@@ -403,6 +421,9 @@ def main(
     quantiles: str = "[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]",
     use_reg_token: bool = False,
     random_init: bool = False,
+    # Engression bits
+    train_m: int = 2,
+    eval_m: int = 64,
     # --------------------
     output_dir: str = "./output/",
     tf32: bool = True,
@@ -552,6 +573,8 @@ def main(
     compute_metrics = make_mean_wql_compute_metrics(quantiles)
     trainer = BoltTrainer(
         model=model,
+        train_m=train_m,
+        eval_m=eval_m,
         args=training_args,
         train_dataset=shuffled_train_dataset,
         eval_dataset=val_dataset,

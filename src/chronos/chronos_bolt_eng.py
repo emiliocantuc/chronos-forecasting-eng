@@ -84,14 +84,18 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
         mask: Optional[torch.Tensor] = None,
         target: Optional[torch.Tensor] = None,
         target_mask: Optional[torch.Tensor] = None,
+        m: Optional[int] = None,
     ) -> ChronosBoltOutput:
         batch_size = context.size(0)
 
+        m = int(m) if m is not None else self.m
+        assert m > 1, "m must be greater than 1"
+
         # repeat context and mask m times
         # TODO what if m is too large?
-        context = repeat(context, "b ... -> (b m) ...", m=self.m)
+        context = repeat(context, "b ... -> (b m) ...", m=m)
         if mask is not None:
-            mask = repeat(mask, "b ... -> (b m) ...", m=self.m)
+            mask = repeat(mask, "b ... -> (b m) ...", m=m)
 
         hidden_states, loc_scale, input_embeds, attention_mask = self.encode(
             context=context, mask=mask
@@ -99,13 +103,13 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
         sequence_output = self.decode(input_embeds, attention_mask, hidden_states)
 
         quantile_preds_shape = (
-            batch_size * self.m,
+            batch_size * m,
             self.num_quantiles,
             self.chronos_config.prediction_length,
         )
         sample_preds_shape = (
             batch_size,
-            self.m,
+            m,
             self.chronos_config.prediction_length,
         )
 
@@ -115,14 +119,14 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
 
         # output head: take all predicted quantiles and output a single sample
         sample_preds = einsum(quantile_preds, self.o_proj, "b q l, q o -> b o l")
-        sample_preds = rearrange(sample_preds, "(b m) 1 l -> b m l", m=self.m)
+        sample_preds = rearrange(sample_preds, "(b m) 1 l -> b m l", m=m)
 
         loss = None
         if target is not None:
             # normalize target
             target_loc_scale = (
-                loc_scale[0][:: self.m, :],
-                loc_scale[1][:: self.m, :],
+                loc_scale[0][::m, :],
+                loc_scale[1][::m, :],
             )  # since loc_scale is repeated m times
             target, _ = self.instance_norm(target, target_loc_scale)
             # target = target.unsqueeze(1)  # type: ignore
@@ -153,7 +157,7 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
 
         # Unscale predictions
         sample_preds = self.instance_norm.inverse(
-            sample_preds.view(batch_size * self.m, -1),
+            sample_preds.view(batch_size * m, -1),
             loc_scale,
         ).view(*sample_preds_shape)
 
