@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+from copy import deepcopy
 import logging
 import itertools
 from pathlib import Path
 from functools import partial
+import random
 from typing import List, Iterator, Optional
 
 import typer
@@ -13,6 +15,7 @@ from typer_config import use_yaml_config
 import numpy as np
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
+import transformers
 from transformers import (
     T5Config,
     Trainer,
@@ -40,6 +43,7 @@ from train import (
     log_on_main,
     get_next_path,
     has_enough_observations,
+    save_training_info,
 )
 
 
@@ -285,8 +289,7 @@ def convert_bolt_to_engression(
     base_state = base_model.state_dict()
 
     missing, unexpected = eng.load_state_dict(base_state, strict=False)
-    print("MISSING:", missing)  # should include your sample_head params
-    print("UNEXPECTED:", unexpected)  # usually empty
+    assert len(unexpected) == 0 and len(missing) == 1 and missing[0] == "o_proj"
 
     if out_dir is not None:
         eng.save_pretrained(out_dir)
@@ -328,6 +331,17 @@ def main(
 ):
     # TODO set seed
 
+    if seed is None:
+        seed = random.randint(0, 2**32)
+
+    log_on_main(f"Using SEED: {seed}", logger)
+    transformers.set_seed(seed=seed)
+
+    raw_training_config = deepcopy(locals())
+    output_dir = Path(output_dir)
+    training_data_paths = ast.literal_eval(training_data_paths)
+    assert isinstance(training_data_paths, list)
+
     if isinstance(probability, str):
         probability = ast.literal_eval(probability)
     elif probability is None:
@@ -336,14 +350,23 @@ def main(
         )
     assert isinstance(probability, list)
 
+    assert len(training_data_paths) == len(probability)
+
     if isinstance(quantiles, str):
         quantiles = ast.literal_eval(quantiles)
     assert isinstance(quantiles, list) and len(quantiles) > 0
 
+    if dataloader_num_workers > len(training_data_paths):
+        log_on_main(
+            f"Setting the number of data loader workers to {len(training_data_paths)}, "
+            f"instead of {dataloader_num_workers}.",
+            logger,
+        )
+        dataloader_num_workers = len(training_data_paths)
+
     output_dir = get_next_path("run", base_dir=Path(output_dir), file_type="")
 
     log_on_main("Loading/Filtering datasets", logger)
-    training_data_paths = ast.literal_eval(training_data_paths)
     train_datasets = [
         Filter(
             partial(
@@ -365,9 +388,7 @@ def main(
             convert_to_eng=True,
         )
     else:
-        log_on_main(
-            f"Loading random-init Chronos-Bolt based on: {model_id}", logger
-        )
+        log_on_main(f"Loading random-init Chronos-Bolt based on: {model_id}", logger)
         model = load_random_bolt_model(
             base_t5_model_id=model_id,
             context_length=context_length,
@@ -434,9 +455,9 @@ def main(
 
     if is_main_process():
         model.save_pretrained(output_dir / "checkpoint-final")
-        # save_training_info(
-        #     output_dir / "checkpoint-final", training_config=deepcopy(locals())
-        # )
+        save_training_info(
+            output_dir / "checkpoint-final", training_config=raw_training_config
+        )
 
 
 if __name__ == "__main__":
