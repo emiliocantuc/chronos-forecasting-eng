@@ -8,8 +8,9 @@ context_length: 512
 prediction_length: 64
 min_past: 60
 max_steps: 1_000 #200_000
-save_steps: 500 #100_000
-log_steps: 500
+save_steps: 1_000 #100_000
+log_steps: 100
+eval_steps: 200
 per_device_train_batch_size: 32
 learning_rate: 0.001
 optim: adamw_torch_fused
@@ -22,7 +23,7 @@ random_init: false #true
 tie_embeddings: true
 output_dir: ./output/
 tf32: true
-torch_compile: true
+torch_compile: false #true TODO revert
 lr_scheduler_type: linear
 warmup_ratio: 0.0
 dataloader_num_workers: 1

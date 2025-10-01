@@ -8,7 +8,7 @@ import itertools
 from pathlib import Path
 from functools import partial
 import random
-from typing import List, Iterator, Optional
+from typing import List, Iterator, Optional, Tuple
 
 import typer
 from typer_config import use_yaml_config
@@ -229,6 +229,30 @@ class BoltTrainer(Trainer):
         loss = out.loss
         return (loss, out) if return_outputs else loss
 
+    @torch.no_grad()
+    def prediction_step(
+        self, model, inputs, prediction_loss_only: bool, ignore_keys=None
+    ):
+        model.train()  # force dropout on eval
+        model.m = 64  # TODO add as arg. Also change batch_size during eval
+
+        out = model(
+            context=inputs["context"],
+            mask=inputs.get("mask"),
+            target=inputs.get("target"),
+            target_mask=inputs.get("target_mask"),
+        )
+        loss = out.loss.detach().to("cpu") if out.loss is not None else None
+        preds = out.quantile_preds.detach().to("cpu")
+
+        labels = inputs.get("target")
+        mask = inputs.get("target_mask")
+        labels = labels.detach().to("cpu") if labels is not None else None
+        mask = mask.detach().to("cpu") if mask is not None else None
+
+        label_pack = {"labels": labels, "mask": mask} if labels is not None else None
+        return loss, preds, label_pack
+
 
 def load_random_bolt_model(
     base_t5_model_id: str = "google/t5-efficient-tiny",
@@ -296,6 +320,64 @@ def convert_bolt_to_engression(
     return eng
 
 
+# Thanks GPT5
+def make_mean_wql_compute_metrics(q_levels, metric_name: str = "mean_wql"):
+    """
+    Returns a HF compute_metrics that outputs a single scalar:
+    the Mean Weighted Sum Quantile Loss (WQL), averaged over series & quantiles.
+
+    Expects:
+      eval_pred.predictions:
+        - (N, Q, L) quantile forecasts with Q == len(q_levels), or
+        - (N, M, L) samples (we take np.quantile over axis=1)
+      eval_pred.label_ids: dict with
+        - 'labels': (N, L)
+        - 'mask'  : (N, L) optional {0,1}/bool
+    """
+    q_levels = np.asarray(q_levels, dtype=np.float64)
+
+    def compute_metrics(eval_pred):
+        preds = eval_pred.predictions
+        pack = eval_pred.label_ids
+
+        y = pack["labels"].astype(np.float64)  # (N, L)
+        m = pack.get("mask", None)
+        if m is None:
+            m = np.ones_like(y, dtype=bool)
+        else:
+            m = m.astype(bool)
+
+        # Ensure (N, Q, L)
+        if preds.ndim == 3 and preds.shape[1] == len(q_levels):
+            preds_q = preds.astype(np.float64)
+        elif preds.ndim == 3:  # samples (N, M, L)
+            preds_q = np.quantile(preds, q=q_levels, axis=1)  # (Q, N, L)
+            preds_q = np.transpose(preds_q, (1, 0, 2))  # (N, Q, L)
+        else:
+            raise ValueError(
+                f"predictions shape {preds.shape} must be (N,Q,L) or (N,M,L)."
+            )
+
+        # Denominator per series: sum_t |y_t| over observed steps
+        denom = (np.abs(y) * m).sum(axis=1) + 1e-8  # (N,)
+
+        # Pinball loss per (series, quantile, time)
+        u = y[:, None, :] - preds_q  # (N, Q, L)
+        u = u * m[:, None, :]  # mask
+        pinball = np.maximum(
+            q_levels[None, :, None] * u, (q_levels[None, :, None] - 1.0) * u
+        )  # (N, Q, L)
+
+        # Weighted Sum Quantile Loss per (series, quantile)
+        wsql_bq = pinball.sum(axis=2) / denom[:, None]  # (N, Q)
+
+        # Mean across series & quantiles
+        mean_wql = float(wsql_bq.mean())
+        return {metric_name: mean_wql}
+
+    return compute_metrics
+
+
 @app.command()
 @use_yaml_config(param_name="config")
 def main(
@@ -306,8 +388,10 @@ def main(
     min_past: int = 64,
     max_steps: int = 200_000,
     save_steps: int = 50_000,
-    log_steps: int = 500,
+    log_steps: int = 100,
+    eval_steps: int = 100,
     per_device_train_batch_size: int = 32,
+    per_device_eval_batch_size: int = 1,
     learning_rate: float = 1e-3,
     optim: str = "adamw_torch_fused",
     shuffle_buffer_length: int = 100,
@@ -329,8 +413,6 @@ def main(
     max_missing_prop: float = 0.9,
     seed: Optional[int] = None,
 ):
-    # TODO set seed
-
     if seed is None:
         seed = random.randint(0, 2**32)
 
@@ -379,6 +461,26 @@ def main(
         for p in training_data_paths
     ]
 
+    validation_data_paths = training_data_paths  # TODO temp: need a held-out path
+    val_dataset = ChronosBoltDataset(
+        datasets=[  # usually same source as train, or a held-out path
+            Filter(
+                partial(
+                    has_enough_observations,
+                    min_length=min_past + prediction_length,
+                    max_missing_prop=max_missing_prop,
+                ),
+                FileDataset(path=Path(p), freq="h"),
+            )
+            for p in validation_data_paths  # or training_data_paths
+        ],
+        probabilities=[1.0],  # or a list matching your datasets
+        context_length=context_length,
+        prediction_length=prediction_length,
+        min_past=min_past,
+        mode="validation",
+    )
+
     # ---- Load Chronos-Bolt model ----
     log_on_main("Initializing Chronos-Bolt", logger)
     if "bolt" in model_id and not random_init:
@@ -423,6 +525,7 @@ def main(
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=per_device_train_batch_size,
+        per_device_eval_batch_size=per_device_eval_batch_size,
         learning_rate=learning_rate,
         lr_scheduler_type=lr_scheduler_type,
         warmup_ratio=warmup_ratio,
@@ -430,6 +533,8 @@ def main(
         logging_dir=str(output_dir / "logs"),
         logging_strategy="steps",
         logging_steps=log_steps,
+        eval_strategy="steps",
+        eval_steps=eval_steps,
         save_strategy="steps",
         save_steps=save_steps,
         report_to=["tensorboard"],
@@ -443,12 +548,18 @@ def main(
     )
 
     # ---- Trainer ----
+    quantiles = model.config.chronos_config["quantiles"]  # e.g. [0.1,...,0.9]
+    compute_metrics = make_mean_wql_compute_metrics(quantiles)
     trainer = BoltTrainer(
         model=model,
         args=training_args,
         train_dataset=shuffled_train_dataset,
+        eval_dataset=val_dataset,
         data_collator=bolt_collate,
+        compute_metrics=compute_metrics,
     )
+
+    log_on_main(f"Metrics before training: {trainer.evaluate()}", logger)
 
     log_on_main("Training", logger)
     trainer.train()
