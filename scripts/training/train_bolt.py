@@ -400,7 +400,9 @@ def make_mean_wql_compute_metrics(q_levels, metric_name: str = "mean_wql"):
 @use_yaml_config(param_name="config")
 def main(
     training_data_paths: str,
-    probability: Optional[str] = None,
+    eval_data_paths: str,
+    training_probability: Optional[str] = None,
+    eval_probability: Optional[str] = None,
     context_length: int = 512,
     prediction_length: int = 64,
     min_past: int = 64,
@@ -443,17 +445,12 @@ def main(
     raw_training_config = deepcopy(locals())
     output_dir = Path(output_dir)
     training_data_paths = ast.literal_eval(training_data_paths)
+    eval_data_paths = ast.literal_eval(eval_data_paths)
     assert isinstance(training_data_paths, list)
+    assert isinstance(eval_data_paths, list)
 
-    if isinstance(probability, str):
-        probability = ast.literal_eval(probability)
-    elif probability is None:
-        probability = [1.0 / len(ast.literal_eval(training_data_paths))] * len(
-            ast.literal_eval(training_data_paths)
-        )
-    assert isinstance(probability, list)
-
-    assert len(training_data_paths) == len(probability)
+    training_probability = ast.literal_eval(training_probability)
+    eval_probability = ast.literal_eval(eval_probability)
 
     if isinstance(quantiles, str):
         quantiles = ast.literal_eval(quantiles)
@@ -482,9 +479,8 @@ def main(
         for p in training_data_paths
     ]
 
-    validation_data_paths = training_data_paths  # TODO temp: need a held-out path
     val_dataset = ChronosBoltDataset(
-        datasets=[  # usually same source as train, or a held-out path
+        datasets=[
             Filter(
                 partial(
                     has_enough_observations,
@@ -493,9 +489,9 @@ def main(
                 ),
                 FileDataset(path=Path(p), freq="h"),
             )
-            for p in validation_data_paths  # or training_data_paths
+            for p in eval_data_paths
         ],
-        probabilities=[1.0],  # or a list matching your datasets
+        probabilities=eval_probability,
         context_length=context_length,
         prediction_length=prediction_length,
         min_past=min_past,
@@ -535,7 +531,7 @@ def main(
     # ---- Dataset ----
     shuffled_train_dataset = ChronosBoltDataset(
         datasets=train_datasets,
-        probabilities=probability,
+        probabilities=training_probability,
         context_length=context_length,
         prediction_length=prediction_length,
         min_past=min_past,

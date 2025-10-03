@@ -1,9 +1,16 @@
 training_data_paths:
-# - "/home/ubuntu/tsmixup-data.arrow"
-- "kernelsynth-data.arrow"
-probability:
-- 1.0
-# - 0.1
+- "data/train/training_corpus_kernel_synth_1m.arrow"
+- "data/train/training_corpus_tsmixup_10m.arrow"
+training_probability:
+- 0.5
+- 0.5
+eval_data_paths:
+- "data/val/training_corpus_kernel_synth_1m.arrow"
+- "data/val/training_corpus_tsmixup_10m.arrow"
+eval_probability:
+- 0.5
+- 0.5
+
 context_length: 512
 prediction_length: 64
 min_past: 60
