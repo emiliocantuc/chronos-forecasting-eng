@@ -222,8 +222,8 @@ class BoltTrainer(Trainer):
     def __init__(
         self,
         *args,
-        train_m: int = 2,
-        eval_m: int = 64,
+        train_m: int = None,
+        eval_m: int = None,
         mc_dropout: bool = False,
         **kwargs,
     ):
@@ -231,15 +231,19 @@ class BoltTrainer(Trainer):
         self.train_m = train_m
         self.eval_m = eval_m
         self.mc_dropout = mc_dropout
+        assert train_m is None or isinstance(self.model, ChronosBoltWithEngressionModel)
 
     def compute_loss(self, model, inputs, return_outputs=False, *args, **kwargs):
-        out = model(
-            context=inputs["context"],
-            mask=inputs.get("mask", None),
-            target=inputs.get("target", None),
-            target_mask=inputs.get("target_mask", None),
-            m=self.train_m,
-        )
+        forward_args = {
+            "context": inputs["context"],
+            "mask": inputs.get("mask", None),
+            "target": inputs.get("target", None),
+            "target_mask": inputs.get("target_mask", None),
+        }
+        if self.train_m is not None:
+            forward_args["m"] = self.train_m
+
+        out = model(**forward_args)
         loss = out.loss
         return (loss, out) if return_outputs else loss
 
@@ -250,13 +254,16 @@ class BoltTrainer(Trainer):
         prev_mode = model.training
         model.train(self.mc_dropout)
 
-        out = model(
-            context=inputs["context"],
-            mask=inputs.get("mask"),
-            target=inputs.get("target"),
-            target_mask=inputs.get("target_mask"),
-            m=self.eval_m,
-        )
+        forward_args = {
+            "context": inputs["context"],
+            "mask": inputs.get("mask", None),
+            "target": inputs.get("target", None),
+            "target_mask": inputs.get("target_mask", None),
+        }
+        if self.eval_m is not None:
+            forward_args["m"] = self.eval_m
+
+        out = model(**forward_args)
 
         model.train(prev_mode)
 
@@ -307,7 +314,7 @@ def load_random_bolt_model(
     return model
 
 
-def load_pretrained_bol_model(
+def load_pretrained_bolt_model(
     base_model_id: str = "amazon/chronos-bolt-tiny",
     convert_to_eng: bool = True,
 ):
@@ -426,6 +433,7 @@ def main(
     # Engression bits
     train_m: int = 2,
     eval_m: int = 64,
+    engression: bool = True,
     # --------------------
     output_dir: str = "./output/",
     tf32: bool = True,
@@ -449,8 +457,17 @@ def main(
     assert isinstance(training_data_paths, list)
     assert isinstance(eval_data_paths, list)
 
-    training_probability = ast.literal_eval(training_probability)
-    eval_probability = ast.literal_eval(eval_probability)
+    def _parse_probs(p, n):
+        if p is None:
+            return [1.0 / n] * n
+        probs = ast.literal_eval(p)
+        assert isinstance(probs, list) and len(probs) == n
+        s = sum(probs)
+        assert s > 0, "probabilities must sum to > 0"
+        return [x / s for x in probs]
+
+    training_probability = _parse_probs(training_probability, len(training_data_paths))
+    eval_probability = _parse_probs(eval_probability, len(eval_data_paths))
 
     if isinstance(quantiles, str):
         quantiles = ast.literal_eval(quantiles)
@@ -502,9 +519,9 @@ def main(
     log_on_main("Initializing Chronos-Bolt", logger)
     if "bolt" in model_id and not random_init:
         log_on_main(f"Loading pretrained Chronos-Bolt: {model_id}", logger)
-        model = load_pretrained_bol_model(
+        model = load_pretrained_bolt_model(
             base_model_id=model_id,
-            convert_to_eng=True,
+            convert_to_eng=engression,
         )
     else:
         log_on_main(f"Loading random-init Chronos-Bolt based on: {model_id}", logger)
@@ -569,8 +586,8 @@ def main(
     compute_metrics = make_mean_wql_compute_metrics(quantiles)
     trainer = BoltTrainer(
         model=model,
-        train_m=train_m,
-        eval_m=eval_m,
+        train_m=train_m if engression else None,
+        eval_m=eval_m if engression else None,
         args=training_args,
         train_dataset=shuffled_train_dataset,
         eval_dataset=val_dataset,
