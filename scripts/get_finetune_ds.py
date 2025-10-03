@@ -14,8 +14,8 @@ from typing import Dict, Iterable, List
 DATASET = "autogluon/chronos_datasets"
 NAMES = ["training_corpus_kernel_synth_1m", "training_corpus_tsmixup_10m"]
 
-OUTDIR = "outdir_arrow"
-N_PER_SUBSET = 10_000  # how many VALID series to take from each subset
+OUTDIR = "data"
+N_PER_SUBSET = 100_000  # how many VALID series to take from each subset
 VAL_FRACTION = 0.1
 FREQ = "H"
 
