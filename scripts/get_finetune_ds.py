@@ -16,7 +16,7 @@ NAMES = ["training_corpus_kernel_synth_1m", "training_corpus_tsmixup_10m"]
 
 OUTDIR = "data"
 N_PER_SUBSET = 100_000  # how many VALID series to take from each subset
-VAL_FRACTION = 0.1
+VAL_FRACTION = 0.05
 FREQ = "H"
 
 MIN_TARGET_LEN = 64 + 64  # strictly greater than this (i.e., > 128)

@@ -218,6 +218,18 @@ def bolt_collate(batch):
     return out
 
 
+def param_groups(model, lr_backbone=1e-5, lr_head=1e-4, wd=0.01):
+    head, back = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        (head if n.startswith(("o_proj", "sample_head")) else back).append(p)
+    return [
+        {"params": back, "lr": lr_backbone, "weight_decay": wd},
+        {"params": head, "lr": lr_head, "weight_decay": wd},
+    ]
+
+
 class BoltTrainer(Trainer):
     def __init__(
         self,
@@ -233,6 +245,15 @@ class BoltTrainer(Trainer):
         self.mc_dropout = mc_dropout
         assert train_m is None or isinstance(self.model, ChronosBoltWithEngressionModel)
 
+    def create_optimizer(self):
+        if self.optimizer is None:
+            self.optimizer = torch.optim.AdamW(
+                param_groups(self.model, lr_backbone=1e-5, lr_head=1e-4, wd=0.01),
+                betas=(0.9, 0.999),
+                eps=1e-8,
+            )
+        return self.optimizer
+
     def compute_loss(self, model, inputs, return_outputs=False, *args, **kwargs):
         forward_args = {
             "context": inputs["context"],
@@ -246,6 +267,7 @@ class BoltTrainer(Trainer):
         model.train()
         out = model(**forward_args)
         loss = out.loss
+
         return (loss, out) if return_outputs else loss
 
     @torch.no_grad()
@@ -278,6 +300,16 @@ class BoltTrainer(Trainer):
 
         label_pack = {"labels": labels, "mask": mask} if labels is not None else None
         return loss, preds, label_pack
+
+    def log(self, logs, *args, **kwargs) -> None:
+        # Merge in the last loss terms, if present
+        terms = getattr(self.model, "_last_terms", None)
+        if terms:
+            logs = dict(logs)  # copy to avoid mutating caller's dict
+            logs.setdefault("loss_term1", float(terms["loss_term1"]))
+            logs.setdefault("loss_term2", float(terms["loss_term2"]))
+            logs.setdefault("loss_total", float(terms["loss_total"]))
+        super().log(logs, *args, **kwargs)
 
 
 def load_random_bolt_model(
@@ -526,9 +558,9 @@ def main(
         )
 
         # Freeze every param except the final output layers
-        for n, p in model.named_parameters():
-            if "o_proj" not in n:
-                p.requires_grad = False
+        # for n, p in model.named_parameters():
+        #     if "o_proj" not in n and "output_patch_embedding" not in n:
+        #         p.requires_grad = False
         log_on_main(
             f"Number of trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}",
             logger,
@@ -584,6 +616,7 @@ def main(
         report_to=["tensorboard"],
         max_steps=max_steps,
         gradient_accumulation_steps=gradient_accumulation_steps,
+        max_grad_norm=1.0,  # TODO ?
         dataloader_num_workers=dataloader_num_workers,
         tf32=tf32,
         torch_compile=torch_compile,
@@ -604,8 +637,6 @@ def main(
         data_collator=bolt_collate,
         compute_metrics=compute_metrics,
     )
-
-    log_on_main(f"Metrics before training: {trainer.evaluate()}", logger)
 
     log_on_main("Training", logger)
     trainer.train()

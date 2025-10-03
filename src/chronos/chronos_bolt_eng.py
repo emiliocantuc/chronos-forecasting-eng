@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
@@ -154,6 +155,12 @@ class EngHead(nn.Module):
         pass
 
 
+@dataclass
+class ChronosBoltWithEngressionOutput(ChronosBoltOutput):
+    loss_term1: Optional[torch.Tensor] = None
+    loss_term2: Optional[torch.Tensor] = None
+
+
 class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
     def __init__(self, config, m: int = 4, **kwargs):
         super().__init__(config=config, **kwargs)
@@ -241,7 +248,10 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
                     [target_mask, torch.zeros(padding_shape).to(target_mask)], dim=-1
                 )
 
-            loss = energy_score_w_mask(y=target, preds=sample_preds, mask=target_mask)
+            loss, term1, term2 = energy_score_w_mask(
+                y=target, preds=sample_preds, mask=target_mask, return_components=True
+            )
+            term2 = -term2  # negate to log as positive
 
         # Unscale predictions
         sample_preds = self.instance_norm.inverse(
@@ -249,7 +259,16 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             loc_scale,
         ).view(*sample_preds_shape)
 
-        return ChronosBoltOutput(
+        # For logging
+        self._last_terms = {
+            "loss_term1": term1.detach(),
+            "loss_term2": term2.detach(),
+            "loss_total": loss.detach(),
+        }
+
+        return ChronosBoltWithEngressionOutput(
             loss=loss,
             quantile_preds=sample_preds,
+            loss_term1=term1,
+            loss_term2=term2,
         )
