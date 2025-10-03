@@ -18,6 +18,7 @@ from tqdm.auto import tqdm
 from chronos import (
     BaseChronosPipeline,
     ChronosBoltPipeline,
+    ChronosBoltWithEngressionPipeline,
     ChronosPipeline,
     ForecastType,
 )
@@ -189,6 +190,10 @@ def main(
             top_k=top_k,
             top_p=top_p,
         )
+    elif isinstance(pipeline, ChronosBoltWithEngressionPipeline):
+        print("Loaded as ChronosBoltWithEngressionPipeline")
+        predict_kwargs = dict(num_samples=num_samples)
+
     elif isinstance(pipeline, ChronosBoltPipeline):
         predict_kwargs = {}
 

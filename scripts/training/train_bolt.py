@@ -367,6 +367,7 @@ def convert_bolt_to_engression(
     assert hasattr(cfg, "chronos_config")
 
     cfg.architectures = ["ChronosBoltWithEngressionModel"]  # so HF knows which class
+    cfg.chronos_pipeline_class = "ChronosBoltWithEngressionPipeline"
     eng = ChronosBoltWithEngressionModel(config=cfg)
 
     base_state = base_model.state_dict()
@@ -581,14 +582,19 @@ def main(
         )
 
     # Save runtime config into HF model.config so checkpoints are self-describing
-    model.config.chronos_config = {
-        "context_length": context_length,
-        "prediction_length": prediction_length,
-        "input_patch_size": input_patch_size,
-        "input_patch_stride": input_patch_stride,
-        "quantiles": quantiles,
-        "use_reg_token": use_reg_token,
-    }
+
+    cfg = model.config.chronos_config  # already from the checkpoint
+    cfg.update(
+        {
+            "context_length": context_length,
+            "prediction_length": prediction_length,
+            "input_patch_size": input_patch_size,
+            "input_patch_stride": input_patch_stride,
+            "quantiles": quantiles,
+            # Leave cfg["use_reg_token"] as-is!
+        }
+    )
+    model.config.chronos_config = cfg
 
     # ---- Dataset ----
     shuffled_train_dataset = ChronosBoltDataset(

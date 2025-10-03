@@ -1,12 +1,20 @@
+import logging
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from einops import repeat, rearrange, einsum
+from einops import repeat, rearrange
 from einops.layers.torch import Rearrange
 
-from typing import Optional
 from chronos.chronos_bolt import ChronosBoltModelForForecasting, ChronosBoltOutput
+
+from .base import BaseChronosPipeline, ForecastType
+from typing import List, Optional, Tuple, Union
+import warnings
+from transformers import AutoConfig
+
+
+logger = logging.getLogger(__file__)
 
 
 def energy_score_w_mask(
@@ -17,7 +25,7 @@ def energy_score_w_mask(
     lamb: float = 0.5,
     return_components: bool = False,
     mask=None,
-    normalize: bool = True,  # True -> divide by #observed per series
+    normalize: bool = True,  # divide by #observed per series
 ):
     """
     y:     (B, *)
@@ -27,36 +35,6 @@ def energy_score_w_mask(
     assert preds.shape[0] == y.shape[0] and preds.shape[2:] == y.shape[1:], (
         f"y and preds should only differ in the first dimension: {y.shape} vs {preds.shape}"
     )
-
-    # B, M, *_ = preds.shape
-    # y_flat     = rearrange(y,     'b ... -> b 1 (...)')      # (B,1,H)
-    # preds_flat = rearrange(preds, 'b m ... -> b m (...)')    # (B,M,H)
-    # H = preds_flat.shape[-1]
-
-    # w = torch.ones((B, H), device=preds.device, dtype=preds.dtype) if mask is None \
-    #     else rearrange(mask, 'b ... -> b (...)').to(preds.device, preds.dtype)
-
-    # # Optionally normalize by #observed to keep scale stable across different masks
-    # if normalize:
-    #     obs = w.sum(dim=-1, keepdim=True).clamp_min(1.0)
-    #     w = w / obs
-
-    # # ---- Term 1 ----
-    # diff  = (preds_flat - y_flat) * w.unsqueeze(1)           # (B,M,H)
-    # term1 = torch.linalg.vector_norm(diff, ord=p, dim=2).pow(beta).mean()
-
-    # # ---- Term 2 ----
-    # term2 = torch.tensor(0.0, device=preds.device, dtype=preds.dtype)
-    # if M > 1:
-    #     Z = preds_flat * w.unsqueeze(1)                      # (B,M,H)
-    #     pairwise = torch.cdist(Z, Z, p=p).clamp_min(0).pow(beta)  # (B,M,M)
-    #     # match original scaling (exclude diagonal in expectation): mean * M/(M-1)
-    #     term2 = -lamb * (pairwise.mean(dim=(1,2)) * (M / (M - 1.0))).mean()
-
-    # total = term1 + term2
-    # if return_components:
-    #     return total, term1, term2
-    # return total
 
     b, m, *rest = preds.shape
     y = rearrange(y, "b ... -> b 1 (...)")
@@ -110,7 +88,9 @@ class EngHead(nn.Module):
         b, q, l = x.shape  # (batch, quantile, time series length)
 
         x = repeat(x, "b ... -> (b m) ...", m=m)
-        eps = torch.randn((b * m, self.d_noise, *x.shape[2:]), device=x.device)
+        eps = torch.randn(
+            (b * m, self.d_noise, *x.shape[2:]), device=x.device, dtype=x.dtype
+        )
         x = torch.cat([x, eps], dim=1)  # append noise as extra quantile channels
 
         out = self.ff(x)
@@ -135,11 +115,6 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             # d_hidden=128,
             d_noise=32 - self.num_quantiles,
         )
-
-        # TODO think more about init
-        # self.o_proj = nn.Parameter(
-        #     torch.ones(self.num_quantiles, 1) / self.num_quantiles
-        # )
 
     def forward(
         self,
@@ -176,7 +151,7 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
         # pass through stochastic engression head
         sample_preds = self.out_proj(quantile_preds, m)
 
-        loss = None
+        loss, term1, term2 = None, None, None
         if target is not None:
             # normalize target
             target, _ = self.instance_norm(target, loc_scale)
@@ -209,6 +184,14 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             )
             term2 = -term2  # negate to log as positive
 
+            # For logging
+            self._last_terms = {
+                "loss_term1": term1.detach(),
+                "loss_term2": term2.detach(),
+                "loss_total": loss.detach(),
+                "std_across_samples": sample_preds.detach().std(dim=1).mean(),
+            }
+
         # Unscale predictions
         repeated_loc_scale = (
             repeat(loc_scale[0], "b 1 -> (b m) 1", m=m),
@@ -219,17 +202,163 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             sample_preds.view(b * m, -1), repeated_loc_scale
         ).view(*sample_preds_shape)
 
-        # For logging
-        self._last_terms = {
-            "loss_term1": term1.detach(),
-            "loss_term2": term2.detach(),
-            "loss_total": loss.detach(),
-            "std_across_samples": sample_preds.detach().std(dim=1).mean(),
-        }
-
         return ChronosBoltWithEngressionOutput(
             loss=loss,
             quantile_preds=sample_preds,
             loss_term1=term1,
             loss_term2=term2,
         )
+
+
+class ChronosBoltWithEngressionPipeline(BaseChronosPipeline):
+    forecast_type: ForecastType = (
+        ForecastType.SAMPLES
+    )  # TODO check if this is fair comparison w/bolt
+    default_context_length: int = 2048
+
+    def __init__(self, model: ChronosBoltModelForForecasting):
+        super().__init__(inner_model=model)  # type: ignore
+        self.model = model
+
+    @property
+    def quantiles(self) -> List[float]:
+        return self.model.config.chronos_config["quantiles"]
+
+    # TODO add embed method
+
+    def predict(  # type: ignore[override]
+        self,
+        context: Union[torch.Tensor, List[torch.Tensor]],
+        num_samples: int,
+        prediction_length: Optional[int] = None,
+        limit_prediction_length: bool = False,
+        mc_dropout: bool = False,  # TODO
+    ) -> torch.Tensor:
+        """
+        Get forecasts for the given time series.
+
+        Refer to the base method (``BaseChronosPipeline.predict``)
+        for details on shared parameters.
+        Additional parameters
+        ---------------------
+        limit_prediction_length
+            Force prediction length smaller or equal than the
+            built-in prediction length from the model. False by
+            default. When true, fail loudly if longer predictions
+            are requested, otherwise longer predictions are allowed.
+
+        Returns
+        -------
+        torch.Tensor
+            Forecasts of shape (batch_size, num_samples, prediction_length).
+
+        Raises
+        ------
+        ValueError
+            When limit_prediction_length is True and the prediction_length is
+            greater than model's trainig prediction_length.
+        """
+        context_tensor = self._prepare_and_validate_context(context=context)
+
+        model_context_length = self.model.config.chronos_config["context_length"]
+        model_prediction_length = self.model.config.chronos_config["prediction_length"]
+        if prediction_length is None:
+            prediction_length = model_prediction_length
+
+        if prediction_length > model_prediction_length:
+            msg = (
+                f"We recommend keeping prediction length <= {model_prediction_length}. "
+                "The quality of longer predictions may degrade since the model is not optimized for it. "
+            )
+            if limit_prediction_length:
+                msg += "You can turn off this check by setting `limit_prediction_length=False`."
+                raise ValueError(msg)
+            warnings.warn(msg)
+
+        predictions = []
+        remaining = prediction_length
+
+        # We truncate the context here because otherwise batches with very long
+        # context could take up large amounts of GPU memory unnecessarily.
+        if context_tensor.shape[-1] > model_context_length:
+            context_tensor = context_tensor[..., -model_context_length:]
+
+        # TODO: We unroll the forecast of Chronos Bolt greedily with the full forecast
+        # horizon that the model was trained with (i.e., 64). This results in variance collapsing
+        # every 64 steps.
+        context_tensor = context_tensor.to(
+            device=self.model.device,
+            dtype=torch.float32,
+        )
+        while remaining > 0:
+            with torch.no_grad():
+                prediction = self.model(
+                    context=context_tensor, m=num_samples
+                ).quantile_preds.to(context_tensor)
+
+            predictions.append(prediction)
+            remaining -= prediction.shape[-1]
+
+            if remaining <= 0:
+                break
+
+            central_idx = torch.abs(torch.tensor(self.quantiles) - 0.5).argmin()
+            central_prediction = prediction[:, central_idx]
+
+            context_tensor = torch.cat([context_tensor, central_prediction], dim=-1)
+
+        return torch.cat(predictions, dim=-1)[..., :prediction_length].to(
+            dtype=torch.float32, device="cpu"
+        )
+
+    def predict_quantiles(
+        self,
+        context: Union[torch.Tensor, List[torch.Tensor]],
+        num_samples: int,
+        prediction_length: Optional[int] = None,
+        quantile_levels: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        **predict_kwargs,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Refer to the base method (``BaseChronosPipeline.predict_quantiles``).
+        """
+        # shape (batch_size, num_samples, prediction_length)
+        predictions = self.predict(
+            context,
+            num_samples=num_samples,
+            prediction_length=prediction_length,
+            **predict_kwargs,
+        ).detach()
+
+        quantile_levels = torch.tensor(quantile_levels, dtype=predictions.dtype)
+        qs = torch.quantile(predictions, dim=1, q=quantile_levels)
+
+        median = predictions[:, :, quantile_levels.index(0.5)]
+        mean = predictions.mean(dim=1)
+
+        # NOTE: the median is returned as the mean here
+        return qs, median
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        """
+        Load the model, either from a local path or from the HuggingFace Hub.
+        Supports the same arguments as ``AutoConfig`` and ``AutoModel``
+        from ``transformers``.
+        """
+
+        print("here from pretrained")
+        config = AutoConfig.from_pretrained(*args, **kwargs)
+        assert hasattr(config, "chronos_config"), "Not a Chronos config file"
+
+        architecture = config.architectures[0]
+        class_ = globals().get(architecture)
+
+        if class_ is None:
+            logger.warning(
+                f"Unknown architecture: {architecture}, defaulting to ChronosBoltWithEngressionModel"
+            )
+            class_ = ChronosBoltWithEngressionModel
+
+        model = class_.from_pretrained(*args, **kwargs)
+        return cls(model=model)

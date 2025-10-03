@@ -16,7 +16,7 @@ eval_probability:
 context_length: 512
 prediction_length: 64
 min_past: 60
-max_steps: 10_000 #200_000
+max_steps: 10 #10_000 #200_000
 save_steps: 10_000 #100_000
 log_steps: 100
 eval_steps: 1000
