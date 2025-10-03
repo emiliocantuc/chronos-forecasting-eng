@@ -243,6 +243,7 @@ class BoltTrainer(Trainer):
         if self.train_m is not None:
             forward_args["m"] = self.train_m
 
+        model.train()
         out = model(**forward_args)
         loss = out.loss
         return (loss, out) if return_outputs else loss
@@ -522,6 +523,15 @@ def main(
         model = load_pretrained_bolt_model(
             base_model_id=model_id,
             convert_to_eng=engression,
+        )
+
+        # Freeze every param except the final output layers
+        for n, p in model.named_parameters():
+            if "o_proj" not in n:
+                p.requires_grad = False
+        log_on_main(
+            f"Number of trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}",
+            logger,
         )
     else:
         log_on_main(f"Loading random-init Chronos-Bolt based on: {model_id}", logger)

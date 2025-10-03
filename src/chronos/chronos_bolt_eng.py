@@ -7,65 +7,151 @@ from typing import Optional
 from chronos.chronos_bolt import ChronosBoltModelForForecasting, ChronosBoltOutput
 
 
-def energy_score_masked(
+# def energy_score_masked(
+#     y: torch.Tensor,
+#     preds: torch.Tensor,
+#     mask: torch.Tensor | None = None,
+#     beta: float = 1.0,
+#     p: float = 2.0,
+#     lamb: float = 0.5,
+#     return_components: bool = False,
+#     eps: float = 1e-8,
+# ):
+#     """
+#     Masked generalized energy score (Engression-style).
+
+#     y:     (B, *)
+#     preds: (B, M, *)
+#     mask:  (B, *)  1.0 for observed, 0.0 for missing. If None, all ones.
+
+#     We weight each dimension by w = mask / sqrt(#observed) per item, to avoid
+#     horizon-length bias and keep magnitudes comparable across examples.
+#     """
+#     assert preds.shape[0] == y.shape[0] and preds.shape[2:] == y.shape[1:], (
+#         f"y and preds should only differ in the first dimension: {y.shape} vs {preds.shape}"
+#     )
+
+#     B, M, *rest = preds.shape
+#     y_flat = rearrange(y, "b ... -> b 1 (...)")  # (B,1,H)
+#     preds_flat = rearrange(preds, "b m ... -> b m (...)")  # (B,M,H)
+#     H = preds_flat.shape[-1]
+
+#     if mask is None:
+#         mask = torch.ones((B, H), device=preds.device, dtype=preds.dtype)
+#     else:
+#         mask = rearrange(mask, "b ... -> b (...)").to(preds.device, preds.dtype)
+
+#     # Per-item normalization of mask so loss isn’t dominated by longer valid horizons
+#     obs = mask.sum(dim=-1, keepdim=True).clamp_min(1.0)  # (B,1)
+#     w = mask / obs.sqrt()  # (B,H)
+
+#     # ----- Term 1: E || Y - y ||_p^beta over masked dims -----
+#     diff = (preds_flat - y_flat) * w.unsqueeze(1)  # (B,M,H)
+#     term1 = torch.linalg.vector_norm(diff, ord=p, dim=2).pow(beta)  # (B,M)
+#     term1 = term1.mean()  # scalar
+
+#     # ----- Term 2: - (lambda/2) * E || Y - Y' ||_p^beta over masked dims -----
+#     term2 = torch.tensor(0.0, device=preds.device, dtype=preds.dtype)
+#     if M > 1:
+#         Z = preds_flat * w.unsqueeze(1)  # (B,M,H), weighted samples
+#         # pairwise distances (includes zeros on diagonal)
+#         pdist = torch.cdist(Z, Z, p=p).clamp_min(0).pow(beta)  # (B,M,M)
+#         # exclude diagonal, average per batch item: sum_offdiag / (M*(M-1))
+#         sum_all = pdist.sum(dim=(1, 2))  # (B,)
+#         sum_diag = torch.diagonal(pdist, dim1=1, dim2=2).sum(dim=1)  # (B,)
+#         mean_off = (sum_all - sum_diag) / (M * (M - 1))
+#         term2 = -lamb * mean_off.mean()  # scalar
+
+#     total = term1 + term2
+#     if return_components:
+#         return total, term1, term2
+#     return total
+
+
+def energy_score_w_mask(
     y: torch.Tensor,
     preds: torch.Tensor,
-    mask: torch.Tensor | None = None,
     beta: float = 1.0,
     p: float = 2.0,
     lamb: float = 0.5,
     return_components: bool = False,
-    eps: float = 1e-8,
+    mask=None,
+    normalize: bool = False,  # True -> divide by #observed per series
 ):
     """
-    Masked generalized energy score (Engression-style).
-
     y:     (B, *)
     preds: (B, M, *)
-    mask:  (B, *)  1.0 for observed, 0.0 for missing. If None, all ones.
-
-    We weight each dimension by w = mask / sqrt(#observed) per item, to avoid
-    horizon-length bias and keep magnitudes comparable across examples.
+    mask:  (B, *) in {0,1}/bool. If None, treated as all ones.
     """
     assert preds.shape[0] == y.shape[0] and preds.shape[2:] == y.shape[1:], (
         f"y and preds should only differ in the first dimension: {y.shape} vs {preds.shape}"
     )
 
-    B, M, *rest = preds.shape
-    y_flat = rearrange(y, "b ... -> b 1 (...)")  # (B,1,H)
-    preds_flat = rearrange(preds, "b m ... -> b m (...)")  # (B,M,H)
-    H = preds_flat.shape[-1]
+    # B, M, *_ = preds.shape
+    # y_flat     = rearrange(y,     'b ... -> b 1 (...)')      # (B,1,H)
+    # preds_flat = rearrange(preds, 'b m ... -> b m (...)')    # (B,M,H)
+    # H = preds_flat.shape[-1]
+
+    # w = torch.ones((B, H), device=preds.device, dtype=preds.dtype) if mask is None \
+    #     else rearrange(mask, 'b ... -> b (...)').to(preds.device, preds.dtype)
+
+    # # Optionally normalize by #observed to keep scale stable across different masks
+    # if normalize:
+    #     obs = w.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    #     w = w / obs
+
+    # # ---- Term 1 ----
+    # diff  = (preds_flat - y_flat) * w.unsqueeze(1)           # (B,M,H)
+    # term1 = torch.linalg.vector_norm(diff, ord=p, dim=2).pow(beta).mean()
+
+    # # ---- Term 2 ----
+    # term2 = torch.tensor(0.0, device=preds.device, dtype=preds.dtype)
+    # if M > 1:
+    #     Z = preds_flat * w.unsqueeze(1)                      # (B,M,H)
+    #     pairwise = torch.cdist(Z, Z, p=p).clamp_min(0).pow(beta)  # (B,M,M)
+    #     # match original scaling (exclude diagonal in expectation): mean * M/(M-1)
+    #     term2 = -lamb * (pairwise.mean(dim=(1,2)) * (M / (M - 1.0))).mean()
+
+    # total = term1 + term2
+    # if return_components:
+    #     return total, term1, term2
+    # return total
+
+    b, m, *rest = preds.shape
+    y = rearrange(y, "b ... -> b 1 (...)")
+    preds = rearrange(preds, "b m ... -> b m (...)")
 
     if mask is None:
-        mask = torch.ones((B, H), device=preds.device, dtype=preds.dtype)
+        w = torch.ones_like(y)
     else:
-        mask = rearrange(mask, "b ... -> b (...)").to(preds.device, preds.dtype)
+        w = rearrange(mask, "b ... -> b 1 (...)").to(preds.device, preds.dtype)
 
-    # Per-item normalization of mask so loss isn’t dominated by longer valid horizons
-    obs = mask.sum(dim=-1, keepdim=True).clamp_min(1.0)  # (B,1)
-    w = mask / obs.sqrt()  # (B,H)
+    if normalize:
+        obs = w.sum(dim=-1, keepdim=True).clamp_min(1.0)
+        w = w / obs
 
-    # ----- Term 1: E || Y - y ||_p^beta over masked dims -----
-    diff = (preds_flat - y_flat) * w.unsqueeze(1)  # (B,M,H)
-    term1 = torch.linalg.vector_norm(diff, ord=p, dim=2).pow(beta)  # (B,M)
-    term1 = term1.mean()  # scalar
+    # Term 1: the absolute error between the predicted and true values
+    term1 = torch.linalg.vector_norm((preds - y) * w, ord=p, dim=2).pow(beta).mean()
 
-    # ----- Term 2: - (lambda/2) * E || Y - Y' ||_p^beta over masked dims -----
+    # Term 2: pairwise absolute differences between the predicted values
     term2 = torch.tensor(0.0, device=preds.device, dtype=preds.dtype)
-    if M > 1:
-        Z = preds_flat * w.unsqueeze(1)  # (B,M,H), weighted samples
-        # pairwise distances (includes zeros on diagonal)
-        pdist = torch.cdist(Z, Z, p=p).clamp_min(0).pow(beta)  # (B,M,M)
-        # exclude diagonal, average per batch item: sum_offdiag / (M*(M-1))
-        sum_all = pdist.sum(dim=(1, 2))  # (B,)
-        sum_diag = torch.diagonal(pdist, dim1=1, dim2=2).sum(dim=1)  # (B,)
-        mean_off = (sum_all - sum_diag) / (M * (M - 1))
-        term2 = -lamb * mean_off.mean()  # scalar
 
-    total = term1 + term2
+    if m > 1:
+        # cdist is convenient. The result shape before sum is (n, m, m).
+        Z = preds * w
+        pairwise_l1_dists = torch.cdist(Z, Z, p=p).pow(beta).mean() * m / (m - 1)
+        term2 = -lamb * pairwise_l1_dists
+
     if return_components:
-        return total, term1, term2
-    return total
+        return term1 + term2, term1, term2
+
+    return term1 + term2
+
+
+# TODO
+class EngHead(nn.Module):
+    def __init__(self):
+        pass
 
 
 class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
@@ -90,6 +176,8 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
 
         m = int(m) if m is not None else self.m
         assert m > 1, "m must be greater than 1"
+
+        self.train()  # always force for MC dropout
 
         # repeat context and mask m times
         # TODO what if m is too large?
@@ -153,7 +241,7 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
                     [target_mask, torch.zeros(padding_shape).to(target_mask)], dim=-1
                 )
 
-            loss = energy_score_masked(y=target, preds=sample_preds, mask=target_mask)
+            loss = energy_score_w_mask(y=target, preds=sample_preds, mask=target_mask)
 
         # Unscale predictions
         sample_preds = self.instance_norm.inverse(
