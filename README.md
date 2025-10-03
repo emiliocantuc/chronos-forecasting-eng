@@ -9,4 +9,4 @@ uv run scripts/get_finetuning_ds.py
 
 
 Notes:
-- validation mean wql for plain bolt: 417_520.69
+- validation mean wql for plain bolt: 417_520.69 (tmixup 10m only)

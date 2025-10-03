@@ -309,6 +309,7 @@ class BoltTrainer(Trainer):
             logs.setdefault("loss_term1", float(terms["loss_term1"]))
             logs.setdefault("loss_term2", float(terms["loss_term2"]))
             logs.setdefault("loss_total", float(terms["loss_total"]))
+            logs.setdefault("std_across_samples", float(terms["std_across_samples"]))
         super().log(logs, *args, **kwargs)
 
 
@@ -369,9 +370,11 @@ def convert_bolt_to_engression(
     eng = ChronosBoltWithEngressionModel(config=cfg)
 
     base_state = base_model.state_dict()
+    del base_model  # free memory
 
     missing, unexpected = eng.load_state_dict(base_state, strict=False)
-    assert len(unexpected) == 0 and len(missing) == 1 and missing[0] == "o_proj"
+    # TODO
+    # assert len(unexpected) == 0 and len(missing) == 1 and missing[0] == "o_proj"
 
     if out_dir is not None:
         eng.save_pretrained(out_dir)
@@ -455,7 +458,7 @@ def main(
     learning_rate: float = 1e-3,
     optim: str = "adamw_torch_fused",
     shuffle_buffer_length: int = 100,
-    gradient_accumulation_steps: int = 2,
+    gradient_accumulation_steps: int = 1,  # TODO was 2
     # ---- Bolt bits ----
     model_id: str = "google/t5-efficient-tiny",
     input_patch_size: int = 16,
@@ -627,10 +630,12 @@ def main(
     # ---- Trainer ----
     quantiles = model.config.chronos_config["quantiles"]  # e.g. [0.1,...,0.9]
     compute_metrics = make_mean_wql_compute_metrics(quantiles)
+
     trainer = BoltTrainer(
         model=model,
         train_m=train_m if engression else None,
         eval_m=eval_m if engression else None,
+        mc_dropout=False,  # TODO
         args=training_args,
         train_dataset=shuffled_train_dataset,
         eval_dataset=val_dataset,

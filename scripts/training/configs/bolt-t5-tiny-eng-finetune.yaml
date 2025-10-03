@@ -1,15 +1,17 @@
 training_data_paths:
-- "data/train/training_corpus_kernel_synth_1m.arrow"
-- "data/train/training_corpus_tsmixup_10m.arrow"
+- "data/train/training_corpus_kernel_synth_1m.arrow" # stable? and smaller losses
+# - "data/train/training_corpus_tsmixup_10m.arrow" # larger losses, stable?
 training_probability:
-- 0.5
-- 0.5
+- 1.0
+# - 0.5
+# - 0.5
 eval_data_paths:
 - "data/val/training_corpus_kernel_synth_1m.arrow"
-- "data/val/training_corpus_tsmixup_10m.arrow"
+# - "data/val/training_corpus_tsmixup_10m.arrow"
 eval_probability:
-- 0.5
-- 0.5
+- 1.0
+# - 0.5
+# - 0.5
 
 context_length: 512
 prediction_length: 64
