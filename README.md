@@ -16,7 +16,7 @@ uv run scripts/evaluation/evaluate.py scripts/evaluation/configs/zero-shot.yaml 
     --chronos-model-id "./output/run-1/checkpoint-final" \
     --batch-size=32 \
     --device=cuda:0 \
-    --num-samples 64
+    --num-samples 256
 ```
 
 Notes:
