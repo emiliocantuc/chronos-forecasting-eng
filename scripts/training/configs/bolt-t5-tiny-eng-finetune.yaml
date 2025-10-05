@@ -1,29 +1,28 @@
 training_data_paths:
-- "data/train/training_corpus_kernel_synth_1m.arrow" # stable? and smaller losses
-# - "data/train/training_corpus_tsmixup_10m.arrow" # larger losses, stable?
+- "data/train/kernelsynth-data.arrow" # stable? and smaller losses
+- "data/train/tsmixup-data.arrow" # larger losses, stable?
 training_probability:
 - 1.0
-# - 0.5
-# - 0.5
+- 0.0
 eval_data_paths:
-- "data/val/training_corpus_kernel_synth_1m.arrow"
-# - "data/val/training_corpus_tsmixup_10m.arrow"
+- "data/val/kernelsynth-data.arrow" # stable? and smaller losses
+- "data/val/tsmixup-data.arrow" # larger losses, stable?
 eval_probability:
 - 1.0
-# - 0.5
-# - 0.5
+- 0.0
 
 context_length: 512
 prediction_length: 64
 min_past: 60
-max_steps: 10 #10_000 #200_000
-save_steps: 10_000 #100_000
+max_steps: 10_000 #200_000
+save_steps: 50_000 #100_000
 log_steps: 100
 eval_steps: 1000
 train_m: 2
-eval_m: 64
-per_device_train_batch_size: 128 #64
-per_device_eval_batch_size: 16
+eval_m: 32
+noise_dim: 8
+per_device_train_batch_size: 256 #64
+per_device_eval_batch_size: 64
 learning_rate: 0.0001 #0.001
 optim: adamw_torch_fused
 num_samples: 20
@@ -35,7 +34,7 @@ random_init: false #true
 tie_embeddings: true
 output_dir: ./output/
 tf32: true
-torch_compile: false #true TODO revert
+torch_compile: false #true
 lr_scheduler_type: cosine #linear
 warmup_ratio: 0.1 #0.0
 dataloader_num_workers: 1

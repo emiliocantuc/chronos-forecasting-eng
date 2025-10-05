@@ -7,6 +7,10 @@ uv sync --extra training --no-dev
 uv run scripts/get_finetuning_ds.py
 ```
 
+```sh 
+
+```
+
 ```sh
 uv run scripts/evaluation/evaluate.py scripts/evaluation/configs/zero-shot.yaml tmp.csv \
     --chronos-model-id "./output/run-1/checkpoint-final" \

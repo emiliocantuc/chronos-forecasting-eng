@@ -218,12 +218,14 @@ def bolt_collate(batch):
     return out
 
 
-def param_groups(model, lr_backbone=1e-5, lr_head=1e-4, wd=0.01):
+# TODO make these args
+def param_groups(model, lr_backbone=1e-5, lr_head=1e-3, wd=0.01):
     head, back = [], []
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        (head if n.startswith(("o_proj", "sample_head")) else back).append(p)
+        (head if n.startswith(("out_proj", "sample_head")) else back).append(p)
+    assert len(head) > 0 and len(back) > 0
     return [
         {"params": back, "lr": lr_backbone, "weight_decay": wd},
         {"params": head, "lr": lr_head, "weight_decay": wd},
