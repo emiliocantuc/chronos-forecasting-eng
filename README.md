@@ -4,7 +4,7 @@ Setup:
 ```sh
 uv sync
 uv sync --extra training --no-dev 
-uv run scripts/get_finetuning_ds.py
+uv run scripts/get_finetune_ds.py
 ```
 
 ```sh 
