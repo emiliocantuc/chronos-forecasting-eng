@@ -219,13 +219,18 @@ def bolt_collate(batch):
 
 
 # TODO make these args
-def param_groups(model, lr_backbone=1e-5, lr_head=1e-3, wd=0.01):
+def param_groups(model, lr_backbone, lr_head, wd=0.01):
     head, back = [], []
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        (head if n.startswith(("out_proj", "sample_head")) else back).append(p)
-    assert len(head) > 0 and len(back) > 0
+
+        if n.startswith(("out_proj", "sample_head")):
+            head.append(p)
+            print(f"Head param: {n} {p.shape}")
+        else:
+            back.append(p)
+    # assert len(head) > 0 and len(back) > 0
     return [
         {"params": back, "lr": lr_backbone, "weight_decay": wd},
         {"params": head, "lr": lr_head, "weight_decay": wd},
@@ -238,6 +243,8 @@ class BoltTrainer(Trainer):
         *args,
         train_m: int = None,
         eval_m: int = None,
+        lr_backbone: float = 1e-5,
+        lr_head: float = 1e-4,
         mc_dropout: bool = False,
         **kwargs,
     ):
@@ -245,12 +252,19 @@ class BoltTrainer(Trainer):
         self.train_m = train_m
         self.eval_m = eval_m
         self.mc_dropout = mc_dropout
+        self.lr_backbone = lr_backbone
+        self.lr_head = lr_head
         assert train_m is None or isinstance(self.model, ChronosBoltWithEngressionModel)
 
     def create_optimizer(self):
         if self.optimizer is None:
             self.optimizer = torch.optim.AdamW(
-                param_groups(self.model, lr_backbone=1e-5, lr_head=1e-4, wd=0.01),
+                param_groups(
+                    self.model,
+                    lr_backbone=self.lr_backbone,
+                    lr_head=self.lr_head,
+                    wd=0.01,
+                ),
                 betas=(0.9, 0.999),
                 eps=1e-8,
             )
@@ -458,7 +472,6 @@ def main(
     eval_steps: int = 100,
     per_device_train_batch_size: int = 32,
     per_device_eval_batch_size: int = 1,
-    learning_rate: float = 1e-3,
     optim: str = "adamw_torch_fused",
     shuffle_buffer_length: int = 100,
     gradient_accumulation_steps: int = 1,  # TODO was 2
@@ -473,6 +486,8 @@ def main(
     train_m: int = 2,
     eval_m: int = 64,
     engression: bool = True,
+    lr_backbone: float = 1e-5,
+    lr_head: float = 1e-4,
     # --------------------
     output_dir: str = "./output/",
     tf32: bool = True,
@@ -563,10 +578,6 @@ def main(
             convert_to_eng=engression,
         )
 
-        # Freeze every param except the final output layers
-        # for n, p in model.named_parameters():
-        #     if "o_proj" not in n and "output_patch_embedding" not in n:
-        #         p.requires_grad = False
         log_on_main(
             f"Number of trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad)}",
             logger,
@@ -613,7 +624,7 @@ def main(
         output_dir=str(output_dir),
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
-        learning_rate=learning_rate,
+        # learning_rate=learning_rate,
         lr_scheduler_type=lr_scheduler_type,
         warmup_ratio=warmup_ratio,
         optim=optim,
@@ -643,6 +654,8 @@ def main(
         model=model,
         train_m=train_m if engression else None,
         eval_m=eval_m if engression else None,
+        lr_backbone=lr_backbone,
+        lr_head=lr_head,
         mc_dropout=False,  # TODO
         args=training_args,
         train_dataset=shuffled_train_dataset,

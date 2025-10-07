@@ -8,7 +8,7 @@ uv run scripts/get_finetune_ds.py
 ```
 
 ```sh 
-
+uv run scripts/training/train_bolt.py --config scripts/training/configs/bolt-t5-tiny-eng-finetune.yaml
 ```
 
 ```sh
@@ -21,3 +21,4 @@ uv run scripts/evaluation/evaluate.py scripts/evaluation/configs/zero-shot.yaml 
 
 Notes:
 - validation mean wql for plain bolt: 417_520.69 (tmixup 10m only)
+- val mean wql for bolt w/kernelsynth: about 1M

@@ -2,14 +2,13 @@ import logging
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from einops import repeat, rearrange
-from einops.layers.torch import Rearrange
+from einops import repeat, rearrange, einsum
 
 from chronos.chronos_bolt import (
     ChronosBoltModelForForecasting,
     ChronosBoltOutput,
-    ResidualBlock,
 )
 
 from .base import BaseChronosPipeline, ForecastType
@@ -105,33 +104,71 @@ def energy_score_w_mask(
 #         return out
 
 
-class EngResHead(nn.Module):
-    def __init__(self, features_dim: int, noise_dim: int, out_dim: int, h_dim: int):
+# class EngResHead(nn.Module):
+#     def __init__(self, features_dim: int, noise_dim: int, out_dim: int, h_dim: int):
+#         super().__init__()
+#         self.noise_dim = noise_dim
+#         self.net = nn.Sequential(
+#             nn.Linear(features_dim + noise_dim, h_dim),
+#             nn.GELU(),
+#             nn.Linear(h_dim, h_dim),
+#             nn.GELU(),
+#             nn.Linear(h_dim, out_dim),
+#         )
+#         self.residual_layer = nn.Linear(features_dim, out_dim)
+
+#     def forward(self, x: torch.Tensor, m: int) -> torch.Tensor:
+#         b, c, d = x.shape  # (batch, features_dim)
+
+#         x_in = rearrange(x, "b ... -> b 1 ...")
+
+#         x = repeat(x, "b ... -> (b m) ...", m=m)
+#         eps = torch.randn((b * m, c, self.noise_dim), device=x.device, dtype=x.dtype)
+
+#         x = torch.cat([x, eps], dim=-1)
+
+#         out = self.net(x)
+#         out = rearrange(out, "(b m) ... -> b m ...", m=m)
+
+#         res = self.residual_layer(x_in)
+
+#         return out + res
+
+
+class NoiseEngResHead(nn.Module):
+    def __init__(
+        self,
+        model_dim: int,
+        num_quantiles: int,
+        noise_dim: int,
+        out_dim: int,
+        h_dim: int,
+    ):
         super().__init__()
         self.noise_dim = noise_dim
         self.net = nn.Sequential(
-            nn.Linear(features_dim + noise_dim, h_dim),
-            nn.ReLU(),
+            nn.Linear(model_dim + num_quantiles + noise_dim, h_dim),
+            nn.GELU(),
             nn.Linear(h_dim, h_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(h_dim, out_dim),
         )
-        self.residual_layer = nn.Linear(features_dim, out_dim)
+        self.residual_layer = nn.Linear(model_dim, out_dim)
 
-    def forward(self, x: torch.Tensor, m: int) -> torch.Tensor:
-        b, c, d = x.shape  # (batch, features_dim)
+    def forward(self, h: torch.Tensor, q: torch.Tensor, m: int) -> torch.Tensor:
+        b, c, d = h.shape  # (batch, 1, d_model)
+        b, _q, l = q.shape  # (batch, quantiles, pred len)
 
-        x_in = rearrange(x, "b ... -> b 1 ...")
+        res = self.residual_layer(rearrange(h, "b ... -> b 1 ..."))  # b, 1, pred len
 
-        x = repeat(x, "b ... -> (b m) ...", m=m)
-        eps = torch.randn((b * m, c, self.noise_dim), device=x.device, dtype=x.dtype)
+        q = rearrange(q.mean(-1), "b q -> b 1 q")
+        h = torch.cat([h, q], dim=-1)  # b, 1, d_model + quantiles
 
-        x = torch.cat([x, eps], dim=-1)
-
-        out = self.net(x)
-        out = rearrange(out, "(b m) ... -> b m ...", m=m)
-
-        res = self.residual_layer(x_in)
+        h = repeat(h, "b ... -> b m ...", m=m)  # b, m, 1, d_model + quantiles
+        eps = torch.randn((b, m, c, self.noise_dim), device=h.device, dtype=h.dtype)
+        h = torch.cat([h, eps], dim=-1)
+        out = self.net(h)
+        # out = out - out.mean(dim=1, keepdim=True)  # zero-mean across m noise samples
 
         return out + res
 
@@ -146,15 +183,24 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
     def __init__(self, config, m: int = 4, **kwargs):
         super().__init__(config=config, **kwargs)
         self.m = m
-        # self.out_proj = EngHead(
+        # self.out_proj_q = EngHead(
         #     n_quantiles=self.num_quantiles,
         #     n_pred=self.chronos_config.prediction_length,
         #     # d_hidden=128,
         #     d_noise=32 - self.num_quantiles,
         # )
-        self.out_proj = EngResHead(
-            features_dim=config.d_model,
-            noise_dim=128,  # config.d_noise,  # TODO as arg
+        self.out_proj_q = nn.Parameter(torch.ones(self.num_quantiles, 1))
+
+        # self.out_proj = EngResHead(
+        #     features_dim=config.d_model,
+        #     noise_dim=128,  # config.d_noise,  # TODO as arg
+        #     h_dim=config.d_ff,
+        #     out_dim=self.chronos_config.prediction_length,
+        # )
+        self.out_proj_noise = NoiseEngResHead(
+            model_dim=config.d_model,
+            num_quantiles=self.num_quantiles,
+            noise_dim=55,  # config.d_noise,  # TODO as arg
             h_dim=config.d_ff,
             out_dim=self.chronos_config.prediction_length,
         )
@@ -174,7 +220,9 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
         hidden_states, loc_scale, input_embeds, attention_mask = self.encode(
             context=context, mask=mask
         )
-        sequence_output = self.decode(input_embeds, attention_mask, hidden_states)
+        sequence_output = self.decode(
+            input_embeds, attention_mask, hidden_states
+        )  # (b, 1, d_model)
 
         quantile_preds_shape = (
             b,
@@ -187,9 +235,20 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             self.chronos_config.prediction_length,
         )
 
-        sample_preds = self.out_proj(sequence_output, m).view(*sample_preds_shape)
+        quantile_preds = self.output_patch_embedding(sequence_output).view(
+            *quantile_preds_shape
+        )
+        q_preds = einsum(
+            quantile_preds, F.softmax(self.out_proj_q, dim=0), "b q l, q o -> b o l"
+        )
 
-        loss, term1, term2 = None, None, None
+        noise_preds = self.out_proj_noise(sequence_output, quantile_preds, m).view(
+            *sample_preds_shape
+        )
+
+        sample_preds = q_preds + noise_preds
+
+        loss = term1 = term2 = None
         if target is not None:
             # normalize target
             target, _ = self.instance_norm(target, loc_scale)
@@ -340,8 +399,8 @@ class ChronosBoltWithEngressionPipeline(BaseChronosPipeline):
             if remaining <= 0:
                 break
 
-            central_idx = torch.abs(torch.tensor(self.quantiles) - 0.5).argmin()
-            central_prediction = prediction[:, central_idx]
+            # Central preds are medians across m samples
+            central_prediction = prediction.median(dim=1).values
 
             context_tensor = torch.cat([context_tensor, central_prediction], dim=-1)
 
