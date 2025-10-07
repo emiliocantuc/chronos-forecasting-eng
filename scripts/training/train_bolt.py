@@ -326,6 +326,13 @@ class BoltTrainer(Trainer):
             logs.setdefault("loss_term2", float(terms["loss_term2"]))
             logs.setdefault("loss_total", float(terms["loss_total"]))
             logs.setdefault("std_across_samples", float(terms["std_across_samples"]))
+
+        # Add per-param-group learning rates
+        if hasattr(self, "optimizer") and self.optimizer is not None:
+            for i, pg in enumerate(self.optimizer.param_groups):
+                name = pg.get("name", f"group_{i}")
+                logs[f"lr_{name}"] = float(pg.get("lr", 0.0))
+
         super().log(logs, *args, **kwargs)
 
 
