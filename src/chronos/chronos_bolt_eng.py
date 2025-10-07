@@ -180,28 +180,16 @@ class ChronosBoltWithEngressionOutput(ChronosBoltOutput):
 
 
 class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
-    def __init__(self, config, m: int = 4, **kwargs):
+    def __init__(self, config, **kwargs):
         super().__init__(config=config, **kwargs)
-        self.m = m
-        # self.out_proj_q = EngHead(
-        #     n_quantiles=self.num_quantiles,
-        #     n_pred=self.chronos_config.prediction_length,
-        #     # d_hidden=128,
-        #     d_noise=32 - self.num_quantiles,
-        # )
+
         self.out_proj_q = nn.Parameter(torch.ones(self.num_quantiles, 1))
 
-        # self.out_proj = EngResHead(
-        #     features_dim=config.d_model,
-        #     noise_dim=128,  # config.d_noise,  # TODO as arg
-        #     h_dim=config.d_ff,
-        #     out_dim=self.chronos_config.prediction_length,
-        # )
         self.out_proj_noise = NoiseEngResHead(
             model_dim=config.d_model,
             num_quantiles=self.num_quantiles,
             noise_dim=55,  # config.d_noise,  # TODO as arg
-            h_dim=config.d_ff,
+            h_dim=config.d_ff,  # 1024
             out_dim=self.chronos_config.prediction_length,
         )
 
@@ -215,7 +203,6 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
     ) -> ChronosBoltOutput:
         b, l = context.shape
         q = self.num_quantiles
-        m = m or self.m
 
         hidden_states, loc_scale, input_embeds, attention_mask = self.encode(
             context=context, mask=mask
@@ -235,11 +222,14 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             self.chronos_config.prediction_length,
         )
 
-        quantile_preds = self.output_patch_embedding(sequence_output).view(
-            *quantile_preds_shape
-        )
+        with torch.no_grad():
+            quantile_preds = self.output_patch_embedding(sequence_output).view(
+                *quantile_preds_shape
+            )
         q_preds = einsum(
-            quantile_preds, F.softmax(self.out_proj_q, dim=0), "b q l, q o -> b o l"
+            quantile_preds,
+            F.softmax(self.out_proj_q, dim=0),
+            "b q l, q o -> b o l",
         )
 
         noise_preds = self.out_proj_noise(sequence_output, quantile_preds, m).view(
