@@ -20,6 +20,7 @@ log_steps: 100
 eval_steps: 1000
 train_m: 4
 eval_m: 32
+# engression: false # for testing
 
 noise_dim: 8
 per_device_train_batch_size: 256 #64
@@ -27,7 +28,7 @@ per_device_eval_batch_size: 64
 
 # learning_rate: 0.0001 #0.001
 lr_backbone: 1e-5
-lr_head: 1e-5
+lr_head: 1e-3
 
 optim: adamw_torch_fused
 num_samples: 20

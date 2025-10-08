@@ -20,5 +20,8 @@ uv run scripts/evaluation/evaluate.py scripts/evaluation/configs/zero-shot.yaml 
 ```
 
 Notes:
-- validation mean wql for plain bolt: 417_520.69 (tmixup 10m only)
-- val mean wql for bolt w/kernelsynth: about 1M
+
+validation mean wql for plain bolt:
+- kernelsynth only: 10
+- tmixup only: 10
+

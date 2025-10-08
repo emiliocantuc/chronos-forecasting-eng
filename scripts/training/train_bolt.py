@@ -149,17 +149,13 @@ class ChronosBoltDataset(IterableDataset, ShuffleMixin):
         # - future_target        (L_pred,)
         # They may contain NaNs for missing values.
 
-        past = entry["past_target"].astype(self.np_dtype)
-        fut = entry["future_target"].astype(self.np_dtype)
+        past = entry["past_target"].astype(self.np_dtype)  # keep NaNs
+        fut = entry["future_target"].astype(self.np_dtype)  # keep NaNs
 
-        # Observed masks: 1 where not NaN
         past_mask = (~np.isnan(past)).astype(self.np_dtype)
         fut_mask = (~np.isnan(fut)).astype(self.np_dtype)
 
-        # Convert NaNs to zeros; Bolt will use masks to zero them before patching anyway.
-        past = np.nan_to_num(past, nan=0.0)
-        fut = np.nan_to_num(fut, nan=0.0)
-
+        # DO NOT nan_to_num here
         return {
             "context": torch.from_numpy(past.astype(np.float32)),
             "mask": torch.from_numpy(past_mask.astype(np.bool_)),
@@ -406,59 +402,73 @@ def convert_bolt_to_engression(
 
 
 # Thanks GPT5
-def make_mean_wql_compute_metrics(q_levels, metric_name: str = "mean_wql"):
+def make_masked_wql_compute_metrics(q_levels, metric_name: str = "mean_wql"):
     """
-    Returns a HF compute_metrics that outputs a single scalar:
-    the Mean Weighted Sum Quantile Loss (WQL), averaged over series & quantiles.
+    Mean Weighted Sum Quantile Loss (WQL), Chronos-style, NaN-safe.
 
-    Expects:
-      eval_pred.predictions:
-        - (N, Q, L) quantile forecasts with Q == len(q_levels), or
-        - (N, M, L) samples (we take np.quantile over axis=1)
-      eval_pred.label_ids: dict with
-        - 'labels': (N, L)
-        - 'mask'  : (N, L) optional {0,1}/bool
+    Expects eval_pred.predictions:
+      - (N, Q, L) quantile forecasts with Q == len(q_levels), OR
+      - (N, M, L) samples (we convert to quantiles along axis=1)
+
+    Expects eval_pred.label_ids to be a dict with:
+      - 'labels': (N, L) float, may contain NaNs
+      - 'mask'  : (N, L) bool/{0,1}, 1 where observed (optional)
     """
     q_levels = np.asarray(q_levels, dtype=np.float64)
 
     def compute_metrics(eval_pred):
-        preds = eval_pred.predictions
+        preds = np.asarray(eval_pred.predictions)  # (N, Q, L) or (N, M, L)
         pack = eval_pred.label_ids
+        y = np.asarray(pack["labels"], dtype=np.float64)  # (N, L)
 
-        y = pack["labels"].astype(np.float64)  # (N, L)
-        m = pack.get("mask", None)
-        if m is None:
-            m = np.ones_like(y, dtype=bool)
+        # Build/clean mask
+        mask = pack.get("mask", None)
+        if mask is None:
+            mask = np.isfinite(y)  # treat non-finite as missing
         else:
-            m = m.astype(bool)
+            mask = np.asarray(mask, dtype=bool) & np.isfinite(y)
 
-        # Ensure (N, Q, L)
-        if preds.ndim == 3 and preds.shape[1] == len(q_levels):
-            preds_q = preds.astype(np.float64)
-        elif preds.ndim == 3:  # samples (N, M, L)
-            preds_q = np.quantile(preds, q=q_levels, axis=1)  # (Q, N, L)
+        # Ensure length match
+        assert preds.ndim == 3, f"preds must be (N,Q,L) or (N,M,L), got {preds.shape}"
+        N, _, L = preds.shape
+        assert y.shape == (N, L) and mask.shape == (N, L), "label/mask shape mismatch"
+
+        # Convert samples -> quantiles if needed
+        if preds.shape[1] == len(q_levels):
+            preds_q = preds.astype(np.float64)  # (N, Q, L)
+        else:
+            # preds is (N, M, L) samples
+            preds_q = np.quantile(
+                preds.astype(np.float64), q=q_levels, axis=1
+            )  # (Q, N, L)
             preds_q = np.transpose(preds_q, (1, 0, 2))  # (N, Q, L)
-        else:
-            raise ValueError(
-                f"predictions shape {preds.shape} must be (N,Q,L) or (N,M,L)."
-            )
 
-        # Denominator per series: sum_t |y_t| over observed steps
-        denom = (np.abs(y) * m).sum(axis=1) + 1e-8  # (N,)
-
-        # Pinball loss per (series, quantile, time)
+        # Chronos pinball (masked)
+        # u = y - qhat
         u = y[:, None, :] - preds_q  # (N, Q, L)
-        u = u * m[:, None, :]  # mask
+        u *= mask[:, None, :]  # zero where missing
+
         pinball = np.maximum(
             q_levels[None, :, None] * u, (q_levels[None, :, None] - 1.0) * u
         )  # (N, Q, L)
 
-        # Weighted Sum Quantile Loss per (series, quantile)
-        wsql_bq = pinball.sum(axis=2) / denom[:, None]  # (N, Q)
+        # Denominator per series: sum_t |y_t| over observed steps
+        denom = (np.abs(y) * mask).sum(axis=1)  # (N,)
+        valid = denom > 0
+        # avoid /0; we'll exclude invalid series from the mean
+        denom_safe = denom.copy()
+        denom_safe[~valid] = 1.0
 
-        # Mean across series & quantiles
-        mean_wql = float(wsql_bq.mean())
-        return {metric_name: mean_wql}
+        wsql_bq = pinball.sum(axis=2) / denom_safe[:, None]  # (N, Q)
+
+        if valid.any():
+            mean_wql = float(wsql_bq[valid].mean())
+        else:
+            mean_wql = float("nan")
+
+        # Optional: diagnostics to catch data issues
+        frac_valid = float(valid.mean())
+        return {metric_name: mean_wql, "frac_valid_series": frac_valid}
 
     return compute_metrics
 
@@ -655,7 +665,7 @@ def main(
 
     # ---- Trainer ----
     quantiles = model.config.chronos_config["quantiles"]  # e.g. [0.1,...,0.9]
-    compute_metrics = make_mean_wql_compute_metrics(quantiles)
+    compute_metrics = make_masked_wql_compute_metrics(quantiles)
 
     trainer = BoltTrainer(
         model=model,
@@ -671,6 +681,7 @@ def main(
         compute_metrics=compute_metrics,
     )
 
+    log_on_main(f"Eval metrics before training: {trainer.evaluate()}", logger)
     log_on_main("Training", logger)
     trainer.train()
 
