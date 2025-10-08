@@ -2,14 +2,14 @@ training_data_paths:
 - "data/train/kernelsynth-data.arrow" # stable? and smaller losses
 - "data/train/tsmixup-data.arrow" # larger losses, stable?
 training_probability:
-- 1.0
 - 0.0
+- 1.0
 eval_data_paths:
 - "data/val/kernelsynth-data.arrow" # stable? and smaller losses
 - "data/val/tsmixup-data.arrow" # larger losses, stable?
 eval_probability:
-- 1.0
 - 0.0
+- 1.0
 
 context_length: 512
 prediction_length: 64
@@ -27,7 +27,7 @@ per_device_eval_batch_size: 64
 
 # learning_rate: 0.0001 #0.001
 lr_backbone: 1e-5
-lr_head: 1e-3
+lr_head: 1e-5
 
 optim: adamw_torch_fused
 num_samples: 20

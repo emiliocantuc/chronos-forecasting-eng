@@ -149,8 +149,8 @@ class NoiseEngResHead(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(model_dim + num_quantiles + noise_dim, h_dim),
             nn.GELU(),
-            nn.Linear(h_dim, h_dim),
-            nn.GELU(),
+            # nn.Linear(h_dim, h_dim),
+            # nn.GELU(),
             nn.Linear(h_dim, out_dim),
         )
         self.residual_layer = nn.Linear(model_dim, out_dim)
@@ -188,8 +188,8 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
         self.out_proj_noise = NoiseEngResHead(
             model_dim=config.d_model,
             num_quantiles=self.num_quantiles,
-            noise_dim=55,  # config.d_noise,  # TODO as arg
-            h_dim=config.d_ff,  # 1024
+            noise_dim=9,  # config.d_noise,  # TODO as arg
+            h_dim=512,  # config.d_ff,  # 1024
             out_dim=self.chronos_config.prediction_length,
         )
 
