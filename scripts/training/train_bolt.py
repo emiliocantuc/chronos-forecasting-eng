@@ -50,6 +50,32 @@ from train import (
 app = typer.Typer(pretty_exceptions_enable=False)
 
 
+# To prevent training on contexts with no variation, seen during tsmixup
+def has_min_std(
+    entry,
+    field="past_target",
+    min_std=1e-3,
+    tail=None,
+    min_obs=8,  # require at least this many observed points
+):
+    x = entry[field]
+    if tail is not None:
+        x = x[-tail:]  # check only the tail (e.g., last 128)
+
+    m = ~np.isnan(x)
+    n = int(m.sum())
+    if n < min_obs:
+        return False
+
+    # masked mean / var (ddof=0 => stable for n>=1)
+    xz = np.nan_to_num(x, nan=0.0)
+    mu = xz[m].sum() / n
+    var = ((xz[m] - mu) ** 2).sum() / n
+    std = np.sqrt(var)
+
+    return bool(std >= min_std)
+
+
 class ChronosBoltDataset(IterableDataset, ShuffleMixin):
     """
     Yields fixed-length tensors for Chronos-Bolt:
@@ -129,12 +155,18 @@ class ChronosBoltDataset(IterableDataset, ShuffleMixin):
 
     def create_training_data(self, data):
         data = Cyclic(data)
-        split_transform = self._create_instance_splitter(
-            "training"
-        ) + FilterTransformation(
-            condition=lambda entry: (~np.isnan(entry["past_target"])).sum() > 0
-        )
-        return split_transform.apply(data, is_train=True)
+        split = self._create_instance_splitter("training")
+        return (
+            split
+            + FilterTransformation(
+                condition=lambda e: (~np.isnan(e["past_target"])).sum() > 0
+            )
+            + FilterTransformation(
+                condition=lambda e: has_min_std(
+                    e, min_std=1e-5, tail=128, min_obs=8
+                )  # <- τ + optional tail
+            )
+        ).apply(data, is_train=True)
 
     def create_test_data(self, data):
         return self._create_instance_splitter("test").apply(data, is_train=False)
