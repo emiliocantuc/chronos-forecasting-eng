@@ -189,7 +189,7 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             model_dim=config.d_model,
             num_quantiles=self.num_quantiles,
             noise_dim=55,  # config.d_noise,  # TODO as arg
-            h_dim=config.d_ff,  # 1024
+            h_dim=512,  # config.d_ff,  # 1024
             out_dim=self.chronos_config.prediction_length,
         )
 
