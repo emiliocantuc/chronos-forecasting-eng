@@ -24,7 +24,7 @@ def energy_score_w_mask(
     y: torch.Tensor,
     preds: torch.Tensor,
     beta: float = 1.0,
-    p: float = 2.0,
+    p: float = 2.0,  # TODO changed to 1
     lamb: float = 0.5,
     return_components: bool = False,
     mask=None,
@@ -68,71 +68,6 @@ def energy_score_w_mask(
         return term1 + term2, term1, term2
 
     return term1 + term2
-
-
-# class EngHead(nn.Module):
-#     def __init__(
-#         self, n_quantiles: int, n_pred: int, d_noise: int, d_hidden: int | None = None
-#     ):
-#         super().__init__()
-#         self.d_noise = d_noise
-
-#         d_in = (n_quantiles + d_noise) * n_pred
-#         d_hidden = d_hidden or d_in * 4
-
-#         self.ff = nn.Sequential(
-#             Rearrange("b q l -> b (q l)"),
-#             nn.Linear(d_in, d_hidden),
-#             nn.ReLU(),
-#             nn.Linear(d_hidden, d_hidden),
-#             nn.ReLU(),
-#             nn.Linear(d_hidden, n_pred),
-#         )
-
-#     def forward(self, x: torch.Tensor, m: int) -> torch.Tensor:
-#         b, q, l = x.shape  # (batch, quantile, time series length)
-
-#         x = repeat(x, "b ... -> (b m) ...", m=m)
-#         eps = torch.randn(
-#             (b * m, self.d_noise, *x.shape[2:]), device=x.device, dtype=x.dtype
-#         )
-#         x = torch.cat([x, eps], dim=1)  # append noise as extra quantile channels
-
-#         out = self.ff(x)
-#         out = rearrange(out, "(b m) ... -> b m ...", m=m)
-
-#         return out
-
-
-# class EngResHead(nn.Module):
-#     def __init__(self, features_dim: int, noise_dim: int, out_dim: int, h_dim: int):
-#         super().__init__()
-#         self.noise_dim = noise_dim
-#         self.net = nn.Sequential(
-#             nn.Linear(features_dim + noise_dim, h_dim),
-#             nn.GELU(),
-#             nn.Linear(h_dim, h_dim),
-#             nn.GELU(),
-#             nn.Linear(h_dim, out_dim),
-#         )
-#         self.residual_layer = nn.Linear(features_dim, out_dim)
-
-#     def forward(self, x: torch.Tensor, m: int) -> torch.Tensor:
-#         b, c, d = x.shape  # (batch, features_dim)
-
-#         x_in = rearrange(x, "b ... -> b 1 ...")
-
-#         x = repeat(x, "b ... -> (b m) ...", m=m)
-#         eps = torch.randn((b * m, c, self.noise_dim), device=x.device, dtype=x.dtype)
-
-#         x = torch.cat([x, eps], dim=-1)
-
-#         out = self.net(x)
-#         out = rearrange(out, "(b m) ... -> b m ...", m=m)
-
-#         res = self.residual_layer(x_in)
-
-#         return out + res
 
 
 class NoiseEngResHead(nn.Module):
@@ -222,19 +157,18 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             self.chronos_config.prediction_length,
         )
 
-        with torch.no_grad():
-            quantile_preds = self.output_patch_embedding(sequence_output).view(
-                *quantile_preds_shape
-            )
+        quantile_preds = self.output_patch_embedding(sequence_output).view(
+            *quantile_preds_shape
+        )
         q_preds = einsum(
             quantile_preds,
             F.softmax(self.out_proj_q, dim=0),
             "b q l, q o -> b o l",
         )
 
-        noise_preds = self.out_proj_noise(sequence_output, quantile_preds, m).view(
-            *sample_preds_shape
-        )
+        noise_preds = self.out_proj_noise(
+            sequence_output, quantile_preds.detach(), m
+        ).view(*sample_preds_shape)
 
         sample_preds = q_preds + noise_preds
 

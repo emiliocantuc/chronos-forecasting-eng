@@ -40,7 +40,7 @@ random_init: false #true
 tie_embeddings: true
 output_dir: ./output/
 tf32: true
-torch_compile: false #true
+torch_compile: true
 lr_scheduler_type: cosine #linear
 warmup_ratio: 0.2 #0.0
 dataloader_num_workers: 1
