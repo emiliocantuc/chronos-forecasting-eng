@@ -211,6 +211,8 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
                 "loss_term2": term2.detach(),
                 "loss_total": loss.detach(),
                 "std_across_samples": sample_preds.detach().std(dim=1).mean(),
+                "target_mean": target.detach().nanmean(),
+                "context_mean": context.detach().nanmean(),
             }
 
         # Unscale predictions

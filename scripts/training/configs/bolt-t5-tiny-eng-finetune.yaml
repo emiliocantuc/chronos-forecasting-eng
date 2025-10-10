@@ -21,6 +21,7 @@ eval_steps: 1000
 train_m: 4
 eval_m: 32
 # engression: false # for testing
+seed: 42
 
 noise_dim: 8
 per_device_train_batch_size: 256 #64
@@ -40,7 +41,7 @@ random_init: false #true
 tie_embeddings: true
 output_dir: ./output/
 tf32: true
-torch_compile: true
+torch_compile: false #true
 lr_scheduler_type: cosine #linear
 warmup_ratio: 0.2 #0.0
 dataloader_num_workers: 1

@@ -51,29 +51,27 @@ app = typer.Typer(pretty_exceptions_enable=False)
 
 
 # To prevent training on contexts with no variation, seen during tsmixup
-def has_min_std(
-    entry,
-    field="past_target",
-    min_std=1e-3,
-    tail=None,
-    min_obs=8,  # require at least this many observed points
-):
+def robust_std(x, mask=None, eps=1e-8):
+    # x: 1D np array with NaNs
+    if mask is None:
+        mask = ~np.isnan(x)
+    xv = x[mask]
+    if xv.size == 0:
+        return 0.0
+    med = np.median(xv)
+    mad = np.median(np.abs(xv - med))
+    # 1.4826 * MAD = robust sigma
+    return float(1.4826 * mad + eps)
+
+
+def has_min_std(entry, field="past_target", min_std=1e-3, tail=None, min_obs=8):
     x = entry[field]
     if tail is not None:
-        x = x[-tail:]  # check only the tail (e.g., last 128)
-
+        x = x[-tail:]
     m = ~np.isnan(x)
-    n = int(m.sum())
-    if n < min_obs:
+    if m.sum() < min_obs:
         return False
-
-    # masked mean / var (ddof=0 => stable for n>=1)
-    xz = np.nan_to_num(x, nan=0.0)
-    mu = xz[m].sum() / n
-    var = ((xz[m] - mu) ** 2).sum() / n
-    std = np.sqrt(var)
-
-    return bool(std >= min_std)
+    return robust_std(x, m) >= min_std
 
 
 class ChronosBoltDataset(IterableDataset, ShuffleMixin):
@@ -162,9 +160,14 @@ class ChronosBoltDataset(IterableDataset, ShuffleMixin):
                 condition=lambda e: (~np.isnan(e["past_target"])).sum() > 0
             )
             + FilterTransformation(
-                condition=lambda e: has_min_std(
-                    e, min_std=1e-5, tail=128, min_obs=8
-                )  # <- τ + optional tail
+                lambda e: has_min_std(
+                    e, "past_target", min_std=1e-3, tail=128, min_obs=8
+                )
+            )
+            + FilterTransformation(
+                lambda e: has_min_std(
+                    e, "future_target", min_std=1e-3, tail=None, min_obs=8
+                )
             )
         ).apply(data, is_train=True)
 
@@ -246,7 +249,6 @@ def bolt_collate(batch):
     return out
 
 
-# TODO make these args
 def param_groups(model, lr_backbone, lr_head, wd=0.01):
     head, back = [], []
     for n, p in model.named_parameters():
@@ -346,16 +348,21 @@ class BoltTrainer(Trainer):
         return loss, preds, label_pack
 
     def log(self, logs, *args, **kwargs) -> None:
-        # Merge in the last loss terms, if present
-        terms = getattr(self.model, "_last_terms", None)
-        if terms:
-            logs = dict(logs)  # copy to avoid mutating caller's dict
-            logs.setdefault("loss_term1", float(terms["loss_term1"]))
-            logs.setdefault("loss_term2", float(terms["loss_term2"]))
-            logs.setdefault("loss_total", float(terms["loss_total"]))
-            logs.setdefault("std_across_samples", float(terms["std_across_samples"]))
+        logs = dict(logs)  # avoid mutating caller's dict
 
-        # Add per-param-group learning rates
+        # train/eval detection
+        in_eval = any(k.startswith("eval_") for k in logs)
+
+        terms = getattr(self.model, "_last_terms", None)
+        if not in_eval and terms:
+            logs["loss_term1"] = float(terms["loss_term1"])
+            logs["loss_term2"] = float(terms["loss_term2"])
+            logs["loss_total"] = float(terms["loss_total"])
+            logs["std_across_samples"] = float(terms["std_across_samples"])
+            logs["target_mean"] = float(terms["target_mean"])
+            logs["context_mean"] = float(terms["context_mean"])
+
+        # Per-group LRs (keep flat names so they don’t get grouped under train/eval)
         if hasattr(self, "optimizer") and self.optimizer is not None:
             for i, pg in enumerate(self.optimizer.param_groups):
                 name = pg.get("name", f"group_{i}")
@@ -693,6 +700,7 @@ def main(
         torch_compile=torch_compile,
         ddp_find_unused_parameters=False,
         remove_unused_columns=False,  # keep our (context,mask,target,...) dict intact
+        data_seed=seed,
     )
 
     # ---- Trainer ----
