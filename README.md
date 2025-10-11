@@ -25,3 +25,6 @@ validation mean wql for plain bolt:
 - kernelsynth only: 10
 - tmixup only: 10
 
+
+- $$\beta < 1$$ seems to stabilize training. TODO: play with $$p$$ as well.  
+

@@ -23,8 +23,8 @@ logger = logging.getLogger(__file__)
 def energy_score_w_mask(
     y: torch.Tensor,
     preds: torch.Tensor,
-    beta: float = 1.0,
-    p: float = 2.0,  # TODO changed to 1
+    beta: float = 0.5,  # TODO changed to 0.5 (was 1)
+    p: float = 2.0,
     lamb: float = 0.5,
     return_components: bool = False,
     mask=None,
@@ -86,6 +86,8 @@ class NoiseEngResHead(nn.Module):
             nn.GELU(),
             nn.Linear(h_dim, h_dim),
             nn.GELU(),
+            nn.Linear(h_dim, h_dim),
+            nn.GELU(),
             nn.Linear(h_dim, out_dim),
         )
         self.residual_layer = nn.Linear(model_dim, out_dim)
@@ -124,7 +126,7 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
             model_dim=config.d_model,
             num_quantiles=self.num_quantiles,
             noise_dim=55,  # config.d_noise,  # TODO as arg
-            h_dim=512,  # config.d_ff,  # 1024
+            h_dim=1024,  # config.d_ff,  # 1024
             out_dim=self.chronos_config.prediction_length,
         )
 
