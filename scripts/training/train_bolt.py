@@ -273,6 +273,9 @@ class BoltTrainer(Trainer):
         *args,
         train_m: int = None,
         eval_m: int = None,
+        beta: float = 1.0,
+        p: float = 2.0,
+        lamb: float = 0.5,
         lr_backbone: float = 1e-5,
         lr_head: float = 1e-4,
         mc_dropout: bool = False,
@@ -281,6 +284,9 @@ class BoltTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.train_m = train_m
         self.eval_m = eval_m
+        self.beta = beta
+        self.p = p
+        self.lamb = lamb
         self.mc_dropout = mc_dropout
         self.lr_backbone = lr_backbone
         self.lr_head = lr_head
@@ -306,6 +312,9 @@ class BoltTrainer(Trainer):
             "mask": inputs.get("mask", None),
             "target": inputs.get("target", None),
             "target_mask": inputs.get("target_mask", None),
+            "beta": self.beta,
+            "p": self.p,
+            "lamb": self.lamb,
         }
         if self.train_m is not None:
             forward_args["m"] = self.train_m
@@ -541,6 +550,9 @@ def main(
     # Engression bits
     train_m: int = 2,
     eval_m: int = 64,
+    beta: float = 1.0,
+    p: float = 2.0,
+    lamb: float = 0.5,
     engression: bool = True,
     lr_backbone: float = 1e-5,
     lr_head: float = 1e-4,
@@ -711,6 +723,9 @@ def main(
         model=model,
         train_m=train_m if engression else None,
         eval_m=eval_m if engression else None,
+        beta=beta,
+        p=p,
+        lamb=lamb,
         lr_backbone=lr_backbone,
         lr_head=lr_head,
         mc_dropout=False,  # TODO

@@ -23,7 +23,7 @@ logger = logging.getLogger(__file__)
 def energy_score_w_mask(
     y: torch.Tensor,
     preds: torch.Tensor,
-    beta: float = 0.5,  # TODO changed to 0.5 (was 1)
+    beta: float = 1,
     p: float = 2.0,
     lamb: float = 0.5,
     return_components: bool = False,
@@ -137,6 +137,9 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
         target: Optional[torch.Tensor] = None,
         target_mask: Optional[torch.Tensor] = None,
         m: Optional[int] = None,
+        beta: float = 1.0,
+        p: float = 2.0,
+        lamb: float = 0.5,
     ) -> ChronosBoltOutput:
         b, l = context.shape
         q = self.num_quantiles
@@ -203,7 +206,13 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
                 )
 
             loss, term1, term2 = energy_score_w_mask(
-                y=target, preds=sample_preds, mask=target_mask, return_components=True
+                y=target,
+                preds=sample_preds,
+                mask=target_mask,
+                return_components=True,
+                beta=beta,
+                p=p,
+                lamb=lamb,
             )
             term2 = -term2  # negate to log as positive
 

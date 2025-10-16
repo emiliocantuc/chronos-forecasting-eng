@@ -20,6 +20,9 @@ log_steps: 100
 eval_steps: 1000
 train_m: 4
 eval_m: 32
+beta: 1.0
+p: 2.0
+lamb: 0.5
 # engression: false # for testing
 seed: 42
 
