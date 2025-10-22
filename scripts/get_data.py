@@ -1,57 +1,101 @@
-# https://github.com/amazon-science/chronos-forecasting/discussions/162
-
 import datasets
 import numpy as np
 from gluonts.dataset.arrow import ArrowWriter
-from tqdm.auto import tqdm
+from pathlib import Path
+from itertools import islice, chain
+import argparse
 
 
-def hf_to_gluonts_univariate(hf_dataset: datasets.Dataset, batch_size: int = 1000):
-    series_fields = [
-        col
-        for col in hf_dataset.features
-        if isinstance(hf_dataset.features[col], datasets.Sequence)
-    ]
-    series_fields.remove("timestamp")
-    dataset_length = hf_dataset.info.splits["train"].num_examples
+def _expand_examples(example_iter, series_fields):
+    """GluonTS-style generator from a stream of HF examples."""
+    for ex in example_iter:
+        start = np.datetime64(ex["timestamp"][0], "s")
+        for field in series_fields:
+            yield {"start": start, "target": np.asarray(ex[field])}
 
-    pbar = tqdm(total=dataset_length)
-    for batch in hf_dataset.iter(batch_size=batch_size):
-        batch = [dict(zip(batch, t)) for t in zip(*batch.values())]
-        for hf_entry in batch:
-            for field in series_fields:
-                yield {
-                    "start": np.datetime64(hf_entry["timestamp"][0], "s"),
-                    "target": np.array(hf_entry[field]),
-                }
-        pbar.update(batch_size)
-    pbar.close()
+
+def _series_fields_from_first(example):
+    # mimic the original "all sequence fields except timestamp"
+    fields = []
+    for k, v in example.items():
+        if k == "timestamp":
+            continue
+        if isinstance(v, (list, tuple, np.ndarray)):
+            fields.append(k)
+    return fields
+
+
+def write_one_subset(
+    hf_name: str,
+    prefix: str,
+    outdir: Path,
+    n_total: int,
+    val_fraction: float,
+    compression: str,
+):
+    # --- streaming load: avoids downloading the whole split ---
+    ds_stream = datasets.load_dataset(
+        "autogluon/chronos_datasets",
+        hf_name,
+        split="train",
+        streaming=True,
+    ).with_format("numpy")
+
+    it = iter(ds_stream)
+    first = next(it)  # peek to infer fields
+    series_fields = _series_fields_from_first(first)
+
+    n_val = int(round(n_total * val_fraction))
+    n_train = n_total - n_val
+
+    # reconstruct full iterator including the peeked first example
+    full_iter = chain([first], it)
+
+    # train = first n_train rows (no shuffle), val = next n_val rows
+    train_iter = _expand_examples(islice(full_iter, n_train), series_fields)
+    val_iter = _expand_examples(islice(full_iter, n_val), series_fields)
+
+    ArrowWriter(compression=compression).write_to_file(
+        train_iter, path=str(outdir / "train" / f"{prefix}.arrow")
+    )
+    ArrowWriter(compression=compression).write_to_file(
+        val_iter, path=str(outdir / "val" / f"{prefix}.arrow")
+    )
 
 
 if __name__ == "__main__":
-    # Increase this until saturation
-    batch_size = 50_000
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n_total", type=int, default=100_000)
+    parser.add_argument("--val_fraction", type=float, default=0.05)
+    parser.add_argument("--compression", type=str, default="lz4")
+    parser.add_argument("--outdir", type=str, default="./data")
+    args = parser.parse_args()
 
-    # Load TSMixup data and convert it into GluonTS arrow format
-    ds = datasets.load_dataset(
-        "autogluon/chronos_datasets",
+    if args.compression.lower() == "none":
+        args.compression = None
+
+    N_TOTAL = args.n_total
+    VAL_FRACTION = args.val_fraction
+    COMPRESSION = args.compression
+
+    OUTDIR = Path(args.outdir)
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+    OUTDIR.joinpath("train").mkdir(parents=True, exist_ok=True)
+    OUTDIR.joinpath("val").mkdir(parents=True, exist_ok=True)
+
+    write_one_subset(
         "training_corpus_tsmixup_10m",
-        split="train",
+        "tsmixup-data",
+        OUTDIR,
+        N_TOTAL,
+        VAL_FRACTION,
+        COMPRESSION,
     )
-    ds.set_format("numpy")
-    ArrowWriter(compression="lz4").write_to_file(
-        hf_to_gluonts_univariate(ds, batch_size=batch_size),
-        path="data/tsmixup-data.arrow",
-    )
-
-    # Load KernelSynth data and convert it into GluonTS arrow format
-    ds = datasets.load_dataset(
-        "autogluon/chronos_datasets",
+    write_one_subset(
         "training_corpus_kernel_synth_1m",
-        split="train",
-    )
-    ds.set_format("numpy")
-    ArrowWriter(compression="lz4").write_to_file(
-        hf_to_gluonts_univariate(ds, batch_size=batch_size),
-        path="data/kernelsynth-data.arrow",
+        "kernelsynth-data",
+        OUTDIR,
+        N_TOTAL,
+        VAL_FRACTION,
+        COMPRESSION,
     )

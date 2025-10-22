@@ -4,7 +4,7 @@ Setup:
 ```sh
 uv sync
 uv sync --extra training --no-dev 
-uv run scripts/get_finetune_ds.py
+HF_HOME=~/.cache/huggingface uv run scripts/get_data.py
 ```
 
 ```sh 
