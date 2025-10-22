@@ -1,4 +1,3 @@
-# Minimal edits to: use streaming, take 100k rows, no-shuffle train/val split
 import datasets
 import numpy as np
 from gluonts.dataset.arrow import ArrowWriter
@@ -7,7 +6,7 @@ from itertools import islice, chain
 
 N_TOTAL = 100_000
 VAL_FRACTION = 0.05
-COMPRESSION = "lz4"  # set to None for peak write speed
+COMPRESSION = None  # "lz4"  # set to None for peak write speed
 OUTDIR = Path("./data")
 OUTDIR.joinpath("train").mkdir(parents=True, exist_ok=True)
 OUTDIR.joinpath("val").mkdir(parents=True, exist_ok=True)
@@ -39,7 +38,7 @@ def write_one_subset(hf_name: str, prefix: str):
         hf_name,
         split="train",
         streaming=True,
-    )
+    ).with_format("numpy")
 
     it = iter(ds_stream)
     first = next(it)  # peek to infer fields
