@@ -9,6 +9,7 @@ from einops import repeat, rearrange, einsum
 from chronos.chronos_bolt import (
     ChronosBoltModelForForecasting,
     ChronosBoltOutput,
+    ResidualBlock,
 )
 
 from .base import BaseChronosPipeline, ForecastType
@@ -116,19 +117,154 @@ class ChronosBoltWithEngressionOutput(ChronosBoltOutput):
     loss_term2: Optional[torch.Tensor] = None
 
 
+# class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
+#     def __init__(self, config, **kwargs):
+#         super().__init__(config=config, **kwargs)
+
+#         self.out_proj_q = nn.Parameter(torch.ones(self.num_quantiles, 1))
+
+#         self.out_proj_noise = NoiseEngResHead(
+#             model_dim=config.d_model,
+#             num_quantiles=self.num_quantiles,
+#             noise_dim=55,  # config.d_noise,  # TODO as arg
+#             h_dim=1024,  # config.d_ff,  # 1024
+#             out_dim=self.chronos_config.prediction_length,
+#         )
+
+#     def forward(
+#         self,
+#         context: torch.Tensor,
+#         mask: Optional[torch.Tensor] = None,
+#         target: Optional[torch.Tensor] = None,
+#         target_mask: Optional[torch.Tensor] = None,
+#         m: Optional[int] = None,
+#         beta: float = 1.0,
+#         p: float = 2.0,
+#         lamb: float = 0.5,
+#     ) -> ChronosBoltOutput:
+#         b, l = context.shape
+#         q = self.num_quantiles
+
+#         hidden_states, loc_scale, input_embeds, attention_mask = self.encode(
+#             context=context, mask=mask
+#         )
+#         sequence_output = self.decode(
+#             input_embeds, attention_mask, hidden_states
+#         )  # (b, 1, d_model)
+
+#         quantile_preds_shape = (
+#             b,
+#             q,
+#             self.chronos_config.prediction_length,
+#         )
+#         sample_preds_shape = (
+#             b,
+#             m,
+#             self.chronos_config.prediction_length,
+#         )
+
+#         quantile_preds = self.output_patch_embedding(sequence_output).view(
+#             *quantile_preds_shape
+#         )
+#         q_preds = einsum(
+#             quantile_preds,
+#             F.softmax(self.out_proj_q, dim=0),
+#             "b q l, q o -> b o l",
+#         )
+
+#         noise_preds = self.out_proj_noise(
+#             sequence_output, quantile_preds.detach(), m
+#         ).view(*sample_preds_shape)
+
+#         sample_preds = q_preds + noise_preds
+
+#         loss = term1 = term2 = None
+#         if target is not None:
+#             # normalize target
+#             target, _ = self.instance_norm(target, loc_scale)
+#             # target = target.unsqueeze(1)  # type: ignore
+#             assert self.chronos_config.prediction_length >= target.shape[-1]
+
+#             target = target.to(sample_preds.device)
+#             target_mask = (
+#                 target_mask.to(sample_preds.device)  # target_mask.unsqueeze(1)
+#                 if target_mask is not None
+#                 else ~torch.isnan(target)
+#             )
+#             target[~target_mask] = 0.0
+
+#             # pad target and target_mask if they are shorter than model's prediction_length
+#             if self.chronos_config.prediction_length > target.shape[-1]:
+#                 padding_shape = (
+#                     *target.shape[:-1],
+#                     self.chronos_config.prediction_length - target.shape[-1],
+#                 )
+#                 target = torch.cat(
+#                     [target, torch.zeros(padding_shape).to(target)], dim=-1
+#                 )
+#                 target_mask = torch.cat(
+#                     [target_mask, torch.zeros(padding_shape).to(target_mask)], dim=-1
+#                 )
+
+#             loss, term1, term2 = energy_score_w_mask(
+#                 y=target,
+#                 preds=sample_preds,
+#                 mask=target_mask,
+#                 return_components=True,
+#                 beta=beta,
+#                 p=p,
+#                 lamb=lamb,
+#             )
+#             term2 = -term2  # negate to log as positive
+
+#             # For logging
+#             self._last_terms = {
+#                 "loss_term1": term1.detach(),
+#                 "loss_term2": term2.detach(),
+#                 "loss_total": loss.detach(),
+#                 "std_across_samples": sample_preds.detach().std(dim=1).mean(),
+#                 "target_mean": target.detach().nanmean(),
+#                 "context_mean": context.detach().nanmean(),
+#             }
+
+#         # Unscale predictions
+#         repeated_loc_scale = (
+#             repeat(loc_scale[0], "b 1 -> (b m) 1", m=m),
+#             repeat(loc_scale[1], "b 1 -> (b m) 1", m=m),
+#         )
+
+#         sample_preds = self.instance_norm.inverse(
+#             sample_preds.view(b * m, -1), repeated_loc_scale
+#         ).view(*sample_preds_shape)
+
+#         return ChronosBoltWithEngressionOutput(
+#             loss=loss,
+#             quantile_preds=sample_preds,
+#             loss_term1=term1,
+#             loss_term2=term2,
+#         )
+
+
 class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
     def __init__(self, config, **kwargs):
         super().__init__(config=config, **kwargs)
 
-        self.out_proj_q = nn.Parameter(torch.ones(self.num_quantiles, 1))
-
-        self.out_proj_noise = NoiseEngResHead(
-            model_dim=config.d_model,
-            num_quantiles=self.num_quantiles,
-            noise_dim=55,  # config.d_noise,  # TODO as arg
-            h_dim=1024,  # config.d_ff,  # 1024
+        # Change to output a single pred instead of quantiles
+        self.output_patch_embedding_mod = ResidualBlock(
+            in_dim=config.d_model,
+            h_dim=config.d_ff,
             out_dim=self.chronos_config.prediction_length,
+            act_fn_name=config.dense_act_fn,
+            dropout_p=config.dropout_rate,
         )
+        self.post_init()
+
+        # dropout_layers = [
+        #     p for _, p in self.named_modules() if isinstance(p, nn.Dropout)
+        # ]
+
+        # for layer in dropout_layers[: len(dropout_layers) // 2]:
+        #     layer.p = 0.2
 
     def forward(
         self,
@@ -144,43 +280,33 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
         b, l = context.shape
         q = self.num_quantiles
 
+        self.train()
+        assert self.training
+
+        context = repeat(context, "b ... -> (b m) ...", m=m)
+        mask = repeat(mask, "b ... -> (b m) ...", m=m) if mask is not None else None
+
         hidden_states, loc_scale, input_embeds, attention_mask = self.encode(
             context=context, mask=mask
         )
-        sequence_output = self.decode(
-            input_embeds, attention_mask, hidden_states
-        )  # (b, 1, d_model)
+        sequence_output = self.decode(input_embeds, attention_mask, hidden_states)
 
-        quantile_preds_shape = (
-            b,
-            q,
-            self.chronos_config.prediction_length,
-        )
         sample_preds_shape = (
             b,
             m,
             self.chronos_config.prediction_length,
         )
 
-        quantile_preds = self.output_patch_embedding(sequence_output).view(
-            *quantile_preds_shape
-        )
-        q_preds = einsum(
-            quantile_preds,
-            F.softmax(self.out_proj_q, dim=0),
-            "b q l, q o -> b o l",
-        )
-
-        noise_preds = self.out_proj_noise(
-            sequence_output, quantile_preds.detach(), m
-        ).view(*sample_preds_shape)
-
-        sample_preds = q_preds + noise_preds
+        sample_preds = self.output_patch_embedding_mod(sequence_output)
+        sample_preds = rearrange(sample_preds, "(b m) 1 l -> b m l", b=b, m=m)
 
         loss = term1 = term2 = None
         if target is not None:
             # normalize target
-            target, _ = self.instance_norm(target, loc_scale)
+
+            target, _ = self.instance_norm(
+                target, (loc_scale[0][::m], loc_scale[1][::m])
+            )
             # target = target.unsqueeze(1)  # type: ignore
             assert self.chronos_config.prediction_length >= target.shape[-1]
 
@@ -226,14 +352,8 @@ class ChronosBoltWithEngressionModel(ChronosBoltModelForForecasting):
                 "context_mean": context.detach().nanmean(),
             }
 
-        # Unscale predictions
-        repeated_loc_scale = (
-            repeat(loc_scale[0], "b 1 -> (b m) 1", m=m),
-            repeat(loc_scale[1], "b 1 -> (b m) 1", m=m),
-        )
-
         sample_preds = self.instance_norm.inverse(
-            sample_preds.view(b * m, -1), repeated_loc_scale
+            sample_preds.view(b * m, -1), loc_scale
         ).view(*sample_preds_shape)
 
         return ChronosBoltWithEngressionOutput(

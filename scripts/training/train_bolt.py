@@ -261,6 +261,9 @@ def param_groups(model, lr_backbone, lr_head, wd=0.01):
         else:
             back.append(p)
     # assert len(head) > 0 and len(back) > 0
+    print(
+        f"Total params: {len(head) + len(back)}, head: {len(head)}, back: {len(back)}"
+    )
     return [
         {"params": back, "lr": lr_backbone, "weight_decay": wd},
         {"params": head, "lr": lr_head, "weight_decay": wd},
@@ -728,7 +731,7 @@ def main(
         lamb=lamb,
         lr_backbone=lr_backbone,
         lr_head=lr_head,
-        mc_dropout=False,  # TODO
+        mc_dropout=True,  # TODO
         args=training_args,
         train_dataset=shuffled_train_dataset,
         eval_dataset=val_dataset,
@@ -736,7 +739,7 @@ def main(
         compute_metrics=compute_metrics,
     )
 
-    log_on_main(f"Eval metrics before training: {trainer.evaluate()}", logger)
+    # log_on_main(f"Eval metrics before training: {trainer.evaluate()}", logger)
     log_on_main("Training", logger)
     trainer.train()
 
